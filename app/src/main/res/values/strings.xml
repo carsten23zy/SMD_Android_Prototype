@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">EDGY Privacy</string>
+    <string name="btn_process">Process Test WAV</string>
+    <string name="btn_pick_file">Pick WAV File</string>
+    <string name="btn_process_file">Process Selected File</string>
+    <string name="tier_low">LOW — Passthrough</string>
+    <string name="tier_moderate">MODERATE — VQ + Speaker</string>
+    <string name="tier_high">HIGH — VQ Only</string>
+    <string name="label_status">Status: Ready</string>
+    <string name="label_tier">Privacy Tier:</string>
+    <string name="label_results">Results will appear here</string>
+    <string name="label_model_info">Model: Not loaded</string>
+</resources>
