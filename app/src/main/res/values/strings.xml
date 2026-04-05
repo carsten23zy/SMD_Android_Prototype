@@ -11,4 +11,12 @@
     <string name="label_tier">Privacy Tier:</string>
     <string name="label_results">Results will appear here</string>
     <string name="label_model_info">Model: Not loaded</string>
+
+    <!-- Stage 3 -->
+    <string name="btn_start_capture">Start Capture</string>
+    <string name="btn_stop_capture">Stop Capture</string>
+
+    <!-- Stage 4 -->
+    <string name="btn_reload_model">Reload Model</string>
+    <string name="btn_scan_models">Scan External</string>
 </resources>
