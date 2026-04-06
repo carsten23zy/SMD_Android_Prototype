@@ -151,9 +151,12 @@ class RealtimePipelineManager(
                     totalMs = totalMs
                 )
 
-                // For LOW tier, push raw audio to output buffer
+                // Push audio to output buffer based on tier
                 if (output.tier == PrivacyTier.LOW && output.rawAudio != null) {
                     outputBuffer.push(output.rawAudio)
+                } else if (output.reconstructedAudio != null && output.reconstructedAudio.isNotEmpty()) {
+                    // MODERATE/HIGH: push vocoder-reconstructed audio
+                    outputBuffer.push(output.reconstructedAudio)
                 }
 
                 // Notify output thread

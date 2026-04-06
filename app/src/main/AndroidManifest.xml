@@ -31,6 +31,15 @@
             android:exported="false"
             android:foregroundServiceType="microphone" />
 
+        <service
+            android:name=".sdk.EdgyAudioProvider"
+            android:exported="true"
+            android:permission="android.permission.RECORD_AUDIO">
+            <intent-filter>
+                <action android:name="com.edgy.privacy.AUDIO_SOURCE" />
+            </intent-filter>
+        </service>
+
     </application>
 
 </manifest>
