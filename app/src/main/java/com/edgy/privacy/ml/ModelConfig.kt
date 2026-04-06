@@ -34,7 +34,8 @@ data class FilesConfig(
     @SerializedName("encoder_fp32") val encoderFp32: String,
     @SerializedName("encoder_int8") val encoderInt8: String,
     @SerializedName("codebook") val codebook: String,
-    @SerializedName("speaker_embeddings") val speakerEmbeddings: String
+    @SerializedName("speaker_embeddings") val speakerEmbeddings: String,
+    @SerializedName("projection_matrix") val projectionMatrix: String = "mel_pseudo_inverse.npy"
 )
 
 data class OnnxSettings(

@@ -2,6 +2,7 @@ package com.edgy.privacy.privacy
 
 import com.edgy.privacy.audio.MelSpectrogramExtractor
 import com.edgy.privacy.ml.EdgyEncoder
+import com.edgy.privacy.vocoder.GriffinLimVocoder
 
 /**
  * Orchestrates audio processing based on the selected privacy tier.
@@ -14,7 +15,8 @@ class PrivacyPipeline(
     private val melExtractor: MelSpectrogramExtractor,
     private val encoder: EdgyEncoder,
     private val speakerEmbeddings: Array<FloatArray>,
-    private var speakerIndex: Int = 0
+    private var speakerIndex: Int = 0,
+    private val vocoder: GriffinLimVocoder? = null
 ) {
 
     private var currentTier: PrivacyTier = PrivacyTier.LOW
@@ -69,8 +71,12 @@ class PrivacyPipeline(
                 } else {
                     null
                 }
+                val reconstructed = vocoder?.synthesize(
+                    encoderOutput.vqEmbedding, encoderOutput.codebookIndices
+                )
                 PrivacyOutput(
                     rawAudio = null,
+                    reconstructedAudio = reconstructed,
                     vqEmbedding = encoderOutput.vqEmbedding,
                     speakerEmbedding = speakerEmb,
                     codebookIndices = encoderOutput.codebookIndices,
@@ -81,8 +87,12 @@ class PrivacyPipeline(
             PrivacyTier.HIGH -> {
                 val mel = melExtractor.extract(pcm)
                 val encoderOutput = encoder.encode(mel)
+                val reconstructed = vocoder?.synthesize(
+                    encoderOutput.vqEmbedding, encoderOutput.codebookIndices
+                )
                 PrivacyOutput(
                     rawAudio = null,
+                    reconstructedAudio = reconstructed,
                     vqEmbedding = encoderOutput.vqEmbedding,
                     speakerEmbedding = null,
                     codebookIndices = encoderOutput.codebookIndices,
@@ -95,6 +105,11 @@ class PrivacyPipeline(
         val totalTimeMs = (System.nanoTime() - startTime) / 1_000_000
         return output.copy(processingTimeMs = totalTimeMs)
     }
+
+    /**
+     * Whether vocoder synthesis is available.
+     */
+    fun isVocoderAvailable(): Boolean = vocoder?.isAvailable == true
 
     /**
      * Process a PCM chunk in streaming mode (maintains overlap buffers).
@@ -121,7 +136,11 @@ class PrivacyPipeline(
                 } else {
                     null
                 }
+                val reconstructed = vocoder?.synthesize(
+                    encoderOutput.vqEmbedding, encoderOutput.codebookIndices
+                )
                 PrivacyOutput(
+                    reconstructedAudio = reconstructed,
                     vqEmbedding = encoderOutput.vqEmbedding,
                     speakerEmbedding = speakerEmb,
                     codebookIndices = encoderOutput.codebookIndices,
@@ -135,7 +154,11 @@ class PrivacyPipeline(
                     return PrivacyOutput(tier = PrivacyTier.HIGH, processingTimeMs = 0)
                 }
                 val encoderOutput = encoder.encode(mel)
+                val reconstructed = vocoder?.synthesize(
+                    encoderOutput.vqEmbedding, encoderOutput.codebookIndices
+                )
                 PrivacyOutput(
+                    reconstructedAudio = reconstructed,
                     vqEmbedding = encoderOutput.vqEmbedding,
                     codebookIndices = encoderOutput.codebookIndices,
                     tier = PrivacyTier.HIGH,
@@ -154,6 +177,7 @@ class PrivacyPipeline(
  */
 data class PrivacyOutput(
     val rawAudio: FloatArray? = null,
+    val reconstructedAudio: FloatArray? = null,
     val vqEmbedding: Array<FloatArray>? = null,
     val speakerEmbedding: FloatArray? = null,
     val codebookIndices: IntArray? = null,
@@ -168,6 +192,7 @@ data class PrivacyOutput(
         val map = mutableMapOf<String, Any>()
         map["tier"] = tier.name
         rawAudio?.let { map["raw_audio"] = it }
+        reconstructedAudio?.let { map["reconstructed_audio"] = it }
         vqEmbedding?.let { map["vq_embedding"] = it }
         speakerEmbedding?.let { map["speaker_embedding"] = it }
         codebookIndices?.let { map["codebook_indices"] = it }
@@ -190,12 +215,14 @@ data class PrivacyOutput(
                 append("VQ embedding: $vqShape\n")
                 append("Speaker embedding: $spkShape\n")
                 append("Codebook indices: ${codebookIndices?.size ?: 0} codes\n")
+                append("Reconstructed audio: ${reconstructedAudio?.size ?: 0} samples\n")
             }
             PrivacyTier.HIGH -> {
                 val vqShape = vqEmbedding?.let { "[${it.size}, ${it.firstOrNull()?.size ?: 0}]" } ?: "null"
                 append("VQ embedding: $vqShape\n")
                 append("Speaker embedding: null (stripped)\n")
                 append("Codebook indices: ${codebookIndices?.size ?: 0} codes\n")
+                append("Reconstructed audio: ${reconstructedAudio?.size ?: 0} samples\n")
             }
         }
     }

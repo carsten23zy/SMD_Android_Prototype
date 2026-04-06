@@ -33,6 +33,7 @@ import com.edgy.privacy.privacy.PrivacyOutput
 import com.edgy.privacy.privacy.PrivacyPipeline
 import com.edgy.privacy.privacy.PrivacyTier
 import com.edgy.privacy.util.WavWriter
+import com.edgy.privacy.vocoder.GriffinLimVocoder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,6 +47,8 @@ import kotlinx.coroutines.withContext
  * Stage 2: Pick WAV files, process at selected privacy tier, save outputs.
  * Stage 3: Real-time mic capture with three-thread pipeline and live latency display.
  * Stage 4: Model hot-swap, external model scanning, inference stats.
+ * Stage 5: Griffin-Lim vocoder for audio reconstruction from VQ embeddings.
+ * Stage 6: AIDL Audio Provider SDK for inter-app audio streaming.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -76,6 +79,7 @@ class MainActivity : AppCompatActivity() {
     private var modelManager: ModelManager? = null
     private var melExtractor: MelSpectrogramExtractor? = null
     private var encoder: EdgyEncoder? = null
+    private var vocoder: GriffinLimVocoder? = null
     private var pipeline: PrivacyPipeline? = null
     private var audioOutputService = AudioOutputService()
     private val inferenceStats = InferenceStats()
@@ -235,19 +239,26 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
+                // Stage 5: Load projection matrix and create vocoder
+                val projMatrix = manager.loadProjectionMatrix()
+                val codebook = try { manager.loadCodebook() } catch (e: Exception) { null }
+                val voc = GriffinLimVocoder(config, projMatrix, codebook)
+                vocoder = voc
+
                 modelManager = manager
                 melExtractor = extractor
 
                 if (enc != null) {
                     encoder = enc
-                    val pl = PrivacyPipeline(extractor, enc, speakerEmbeddings)
+                    val pl = PrivacyPipeline(extractor, enc, speakerEmbeddings, vocoder = voc)
                     pl.setTier(getSelectedTier())
                     pipeline = pl
                     pipelineManager = RealtimePipelineManager(pl, inferenceStats)
                 }
 
                 withContext(Dispatchers.Main) {
-                    tvModelInfo.text = manager.getModelInfo()
+                    val vocoderStatus = if (voc.isAvailable) "vocoder: ON" else "vocoder: OFF (no projection matrix)"
+                    tvModelInfo.text = "${manager.getModelInfo()}\n$vocoderStatus"
                     updateStatus("Model loaded — ready")
                     setProcessingEnabled(true)
                 }
@@ -394,12 +405,18 @@ class MainActivity : AppCompatActivity() {
                         encoder = result.encoder
                         melExtractor = result.melExtractor
                         val spk = result.speakerEmbeddings ?: emptyArray()
-                        val pl = PrivacyPipeline(result.melExtractor, result.encoder, spk)
+                        val voc = GriffinLimVocoder(
+                            result.config!!, result.projectionMatrix,
+                            try { manager.loadCodebook() } catch (e: Exception) { null }
+                        )
+                        vocoder = voc
+                        val pl = PrivacyPipeline(result.melExtractor, result.encoder, spk, vocoder = voc)
                         pl.setTier(getSelectedTier())
                         pipeline = pl
                         pipelineManager = RealtimePipelineManager(pl, inferenceStats)
                         inferenceStats.reset()
-                        tvModelInfo.text = manager.getModelInfo()
+                        val vocoderStatus = if (voc.isAvailable) "vocoder: ON" else "vocoder: OFF"
+                        tvModelInfo.text = "${manager.getModelInfo()}\n$vocoderStatus"
                         updateStatus("Model reloaded successfully")
                         appendResult("Model reloaded from bundled assets\n")
                     } else {
@@ -472,12 +489,18 @@ class MainActivity : AppCompatActivity() {
                     encoder = result.encoder
                     melExtractor = result.melExtractor
                     val spk = result.speakerEmbeddings ?: emptyArray()
-                    val pl = PrivacyPipeline(result.melExtractor, result.encoder, spk)
+                    val voc = GriffinLimVocoder(
+                        result.config!!, result.projectionMatrix,
+                        try { manager.loadCodebook() } catch (e: Exception) { null }
+                    )
+                    vocoder = voc
+                    val pl = PrivacyPipeline(result.melExtractor, result.encoder, spk, vocoder = voc)
                     pl.setTier(getSelectedTier())
                     pipeline = pl
                     pipelineManager = RealtimePipelineManager(pl, inferenceStats)
                     inferenceStats.reset()
-                    tvModelInfo.text = manager.getModelInfo()
+                    val vocoderStatus = if (voc.isAvailable) "vocoder: ON" else "vocoder: OFF"
+                    tvModelInfo.text = "${manager.getModelInfo()}\n$vocoderStatus"
                     updateStatus("Loaded: ${modelInfo.name}")
                     appendResult("External model loaded: ${modelInfo.name}\n")
                     appendResult("Size: ${"%.1f".format(result.modelSizeBytes / 1024.0 / 1024.0)} MB\n")
@@ -708,6 +731,8 @@ class MainActivity : AppCompatActivity() {
                 results.append("VQ embedding present [T', 64]: $hasVq (dim=$vqDim)\n")
                 results.append("Speaker embedding present [64]: $hasSpk (dim=$spkDim)\n")
                 results.append("Raw audio null: ${output.rawAudio == null}\n")
+                results.append("Reconstructed audio: ${output.reconstructedAudio?.size ?: 0} samples\n")
+                results.append("Vocoder active: ${pipeline?.isVocoderAvailable() == true}\n")
             }
             PrivacyTier.HIGH -> {
                 val hasVq = output.vqEmbedding != null && output.vqEmbedding.isNotEmpty()
@@ -715,6 +740,8 @@ class MainActivity : AppCompatActivity() {
                 results.append("VQ embedding present [T', 64]: $hasVq (dim=$vqDim)\n")
                 results.append("Speaker embedding null (stripped): ${output.speakerEmbedding == null}\n")
                 results.append("Raw audio null: ${output.rawAudio == null}\n")
+                results.append("Reconstructed audio: ${output.reconstructedAudio?.size ?: 0} samples\n")
+                results.append("Vocoder active: ${pipeline?.isVocoderAvailable() == true}\n")
             }
         }
     }

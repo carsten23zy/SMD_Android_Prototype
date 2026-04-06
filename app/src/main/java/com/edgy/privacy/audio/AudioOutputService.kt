@@ -54,6 +54,14 @@ class AudioOutputService {
                 }
             }
             PrivacyTier.MODERATE -> {
+                // Save reconstructed audio if vocoder produced it
+                output.reconstructedAudio?.let { pcm ->
+                    if (pcm.isNotEmpty()) {
+                        val path = File(dir, "${prefix}_reconstructed.wav").absolutePath
+                        writeToWavFile(path, pcm, sampleRate)
+                        savedFiles.add(path)
+                    }
+                }
                 output.vqEmbedding?.let { vq ->
                     val path = File(dir, "${prefix}_vq_embedding.bin").absolutePath
                     writeFloatMatrix(path, vq)
@@ -75,6 +83,14 @@ class AudioOutputService {
                 savedFiles.add(metaPath)
             }
             PrivacyTier.HIGH -> {
+                // Save reconstructed audio if vocoder produced it
+                output.reconstructedAudio?.let { pcm ->
+                    if (pcm.isNotEmpty()) {
+                        val path = File(dir, "${prefix}_reconstructed.wav").absolutePath
+                        writeToWavFile(path, pcm, sampleRate)
+                        savedFiles.add(path)
+                    }
+                }
                 output.vqEmbedding?.let { vq ->
                     val path = File(dir, "${prefix}_vq_embedding.bin").absolutePath
                     writeFloatMatrix(path, vq)
