@@ -15,7 +15,7 @@ class InferenceStats(private val windowSize: Int = 1000) {
     private val encoderLatencies = ConcurrentLinkedQueue<Long>()
     private val totalLatencies = ConcurrentLinkedQueue<Long>()
     private val chunksProcessed = AtomicLong(0)
-    private var startTimeMs = System.currentTimeMillis()
+    private var startTimeNs = System.nanoTime()
 
     /**
      * Record latency for a single chunk processing.
@@ -51,7 +51,7 @@ class InferenceStats(private val windowSize: Int = 1000) {
      * Get throughput in chunks per second.
      */
     fun getThroughput(): Double {
-        val elapsedSec = (System.currentTimeMillis() - startTimeMs) / 1000.0
+        val elapsedSec = (System.nanoTime() - startTimeNs) / 1_000_000_000.0
         return if (elapsedSec > 0) chunksProcessed.get() / elapsedSec else 0.0
     }
 
@@ -63,7 +63,7 @@ class InferenceStats(private val windowSize: Int = 1000) {
         encoderLatencies.clear()
         totalLatencies.clear()
         chunksProcessed.set(0)
-        startTimeMs = System.currentTimeMillis()
+        startTimeNs = System.nanoTime()
     }
 
     /**

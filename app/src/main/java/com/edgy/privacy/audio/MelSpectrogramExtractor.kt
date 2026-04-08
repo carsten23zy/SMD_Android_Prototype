@@ -129,25 +129,25 @@ class MelSpectrogramExtractor(private val config: ModelConfig) {
      * Extract mel spectrogram in streaming mode.
      * Maintains overlap buffer across calls for continuity.
      *
+     * The overlap buffer stores pre-emphasized samples so preemphasis is applied
+     * exactly once to each sample. Framing is done without center-padding (unlike
+     * batch mode) — the overlap buffer provides the necessary context for windowing.
+     *
      * @param pcmChunk PCM chunk (e.g., 1600 samples for 100ms at 16kHz)
      * @return Mel spectrogram for this chunk [nMels][T']
      */
     fun extractStreaming(pcmChunk: FloatArray): Array<FloatArray> {
-        // Concatenate overlap buffer with new chunk
-        val combined = FloatArray(overlapBuffer.size + pcmChunk.size)
-        System.arraycopy(overlapBuffer, 0, combined, 0, overlapBuffer.size)
-        System.arraycopy(pcmChunk, 0, combined, overlapBuffer.size, pcmChunk.size)
-
-        // Apply preemphasis with state
-        val (preemph, newLastSample) = DSP.applyPreemphasis(combined, preemphCoeff, lastPreemphSample)
+        // Apply preemphasis only to the new chunk, maintaining state across calls
+        val (preemphChunk, newLastSample) = DSP.applyPreemphasis(pcmChunk, preemphCoeff, lastPreemphSample)
         lastPreemphSample = newLastSample
 
-        // Center-pad
-        val padSize = nFft / 2
-        val padded = DSP.padReflect(preemph, padSize)
+        // Concatenate overlap (already pre-emphasized) with new pre-emphasized chunk
+        val combined = FloatArray(overlapBuffer.size + preemphChunk.size)
+        System.arraycopy(overlapBuffer, 0, combined, 0, overlapBuffer.size)
+        System.arraycopy(preemphChunk, 0, combined, overlapBuffer.size, preemphChunk.size)
 
-        // Frame (use nFft as frame length, matching librosa.stft)
-        val frames = DSP.frameSignal(padded, nFft, hopLength)
+        // Frame without center-padding (streaming mode — overlap provides context)
+        val frames = DSP.frameSignal(combined, nFft, hopLength)
         if (frames.isEmpty()) {
             overlapBuffer = combined
             return Array(nMels) { FloatArray(0) }
@@ -186,14 +186,12 @@ class MelSpectrogramExtractor(private val config: ModelConfig) {
             }
         }
 
+        // Save overlap: keep unconsumed samples for the next call
+        val consumed = numFrames * hopLength
+        overlapBuffer = combined.copyOfRange(consumed, combined.size)
+
         // Silence threshold
         if (globalMax < -99.0) {
-            val overlapSize = nFft - hopLength
-            if (combined.size > overlapSize) {
-                overlapBuffer = combined.copyOfRange(combined.size - overlapSize, combined.size)
-            } else {
-                overlapBuffer = combined
-            }
             return Array(nMels) { FloatArray(numFrames) }
         }
 
@@ -203,14 +201,6 @@ class MelSpectrogramExtractor(private val config: ModelConfig) {
                 val clipped = max(melDb[m][t], clipMin)
                 ((clipped - clipMin) / topDb).toFloat()
             }
-        }
-
-        // Save overlap: keep last (nFft - hopLength) samples from the original combined
-        val overlapSize = nFft - hopLength
-        if (combined.size > overlapSize) {
-            overlapBuffer = combined.copyOfRange(combined.size - overlapSize, combined.size)
-        } else {
-            overlapBuffer = combined
         }
 
         return result
