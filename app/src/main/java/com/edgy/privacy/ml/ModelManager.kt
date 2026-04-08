@@ -1,7 +1,6 @@
 package com.edgy.privacy.ml
 
 import android.content.Context
-import ai.onnxruntime.OnnxRuntime
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import com.edgy.privacy.util.NpyReader
@@ -81,7 +80,7 @@ class ModelManager(private val context: Context) {
         }
 
         val session = ortEnvironment.createSession(modelFile.absolutePath, sessionOptions)
-        val encoder = EdgyEncoder(session, config)
+        val encoder = EdgyEncoder(ortEnvironment, session, config)
         currentEncoder = encoder
         currentModelPath = modelFile.absolutePath
         return encoder

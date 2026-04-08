@@ -1,6 +1,7 @@
 package com.edgy.privacy.ml
 
 import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import java.nio.FloatBuffer
 import java.nio.LongBuffer
@@ -13,6 +14,7 @@ import java.nio.LongBuffer
  *         "codebook_indices" int64  [batch * T/2]
  */
 class EdgyEncoder(
+    private val env: OrtEnvironment,
     private val session: OrtSession,
     private val config: ModelConfig
 ) {
@@ -44,7 +46,7 @@ class EdgyEncoder(
         }
 
         val shape = longArrayOf(1, nMels.toLong(), timeSteps.toLong())
-        val env = session.environment
+        /** val env = session.environment **/
 
         val startTime = System.nanoTime()
 
