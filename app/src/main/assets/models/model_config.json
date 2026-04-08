@@ -1,4 +1,8 @@
 {
+  "format_version": 1,
+  "model_name": "EDGY VQ-VAE Encoder",
+  "training_steps": 5000,
+  "training_dataset": "dev-clean",
   "preprocessing": {
     "sample_rate": 16000,
     "n_fft": 2048,
@@ -7,11 +11,17 @@
     "win_length": 400,
     "fmin": 50,
     "preemph": 0.97,
-    "top_db": 80
+    "top_db": 80,
+    "bits": 8
   },
   "encoder": {
+    "channels": 768,
     "n_embeddings": 512,
     "embedding_dim": 64,
+    "jitter": 0.5,
+    "input_shape": "[batch, 80, T]",
+    "output_vq_shape": "[batch, T_half, 64]",
+    "output_indices_shape": "[batch * T_half]",
     "downsampling_factor": 2
   },
   "files": {
@@ -20,10 +30,22 @@
     "codebook": "vq_codebook.npy",
     "speaker_embeddings": "speaker_embeddings.npy"
   },
+  "deployment_guidance": {
+    "default_model": "encoder_fp32",
+    "note": "FP32 is faster on most hardware. INT8 is 4x smaller for constrained devices. Both produce equivalent privacy filtering.",
+    "fp32_size_mb": 31.8,
+    "int8_size_mb": 8.1
+  },
   "android_onnx_settings": {
     "intra_op_num_threads": 4,
     "inter_op_num_threads": 2,
     "execution_mode": "ORT_PARALLEL",
-    "optimization_level": "ALL_OPT"
+    "optimization_level": "ALL_OPT",
+    "use_nnapi": true
+  },
+  "privacy_tiers": {
+    "LOW": "Passthrough \u2014 raw audio, no filtering",
+    "MODERATE": "VQ embedding + speaker embedding (preserves identity)",
+    "HIGH": "VQ embedding only (discards identity)"
   }
 }
