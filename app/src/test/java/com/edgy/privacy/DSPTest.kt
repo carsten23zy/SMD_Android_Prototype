@@ -46,8 +46,8 @@ class DSPTest {
         assertEquals(4, window.size)
         // Hann window: at n=0, value should be 0 (periodic)
         assertEquals(0f, window[0], 1e-6f)
-        // At n=2 (halfway), should be max
-        assertTrue(window[2] < 1e-6f) // periodic Hann goes back to ~0
+        // At n=2 (halfway for size=4), periodic Hann peaks at 1.0
+        assertEquals(1.0f, window[2], 1e-6f)
     }
 
     @Test
