@@ -62,7 +62,7 @@ class EdgyAudioProvider : Service() {
                 2 -> PrivacyTier.HIGH
                 else -> PrivacyTier.MODERATE
             }
-            currentTier = tier
+            this@EdgyAudioProvider.currentTier = tier
             pipeline?.setTier(tier)
 
             // Close any existing pipe
@@ -103,7 +103,7 @@ class EdgyAudioProvider : Service() {
         }
 
         override fun getCurrentTier(): Int {
-            return when (currentTier) {
+            return when (this@EdgyAudioProvider.currentTier) {
                 PrivacyTier.LOW -> 0
                 PrivacyTier.MODERATE -> 1
                 PrivacyTier.HIGH -> 2
