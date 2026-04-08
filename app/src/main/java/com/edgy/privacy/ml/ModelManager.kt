@@ -512,6 +512,11 @@ class ModelManager(private val context: Context) {
      * Resolve a model stream by name, checking external storage first, then assets.
      */
     private fun resolveModelStream(filename: String): java.io.InputStream? {
+        // Gson bypasses Kotlin default values and null-safety, so fields with
+        // defaults (e.g. projectionMatrix) can be null at runtime if absent in JSON.
+        @Suppress("SENSELESS_COMPARISON")
+        if (filename == null) return null
+
         // Check external storage first
         val externalFile = getExternalModelFile(filename)
         if (externalFile != null && externalFile.exists()) {
