@@ -19,7 +19,7 @@
             android:textStyle="bold"
             android:layout_marginBottom="8dp" />
 
-        <!-- Model Info -->
+        <!-- Model Info (Stage 4: tap to show detailed info) -->
         <TextView
             android:id="@+id/tvModelInfo"
             android:layout_width="match_parent"
@@ -64,7 +64,69 @@
 
         </RadioGroup>
 
-        <!-- Stage 1: Process bundled test WAV -->
+        <!-- Stage 3: Real-time capture controls -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Real-Time Capture"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp">
+
+            <Button
+                android:id="@+id/btnStartCapture"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/btn_start_capture"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/btnStopCapture"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/btn_stop_capture"
+                android:enabled="false"
+                android:layout_marginStart="4dp" />
+
+        </LinearLayout>
+
+        <!-- Live latency display -->
+        <TextView
+            android:id="@+id/tvLatency"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Latency: --"
+            android:textSize="13sp"
+            android:fontFamily="monospace"
+            android:layout_marginBottom="4dp" />
+
+        <!-- Capture stats -->
+        <TextView
+            android:id="@+id/tvCaptureStats"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Capture: idle"
+            android:textSize="12sp"
+            android:fontFamily="monospace"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Stage 1-2: Offline processing -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Offline Processing"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
         <Button
             android:id="@+id/btnProcessTest"
             android:layout_width="match_parent"
@@ -72,7 +134,6 @@
             android:text="@string/btn_process"
             android:layout_marginBottom="8dp" />
 
-        <!-- Stage 2: Pick and process WAV file -->
         <Button
             android:id="@+id/btnPickFile"
             android:layout_width="match_parent"
@@ -86,6 +147,49 @@
             android:layout_height="wrap_content"
             android:text="@string/btn_process_file"
             android:enabled="false"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Stage 4: Model management -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Model Management"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp">
+
+            <Button
+                android:id="@+id/btnReloadModel"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/btn_reload_model"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/btnScanModels"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/btn_scan_models"
+                android:layout_marginStart="4dp" />
+
+        </LinearLayout>
+
+        <!-- Inference stats display -->
+        <TextView
+            android:id="@+id/tvInferenceStats"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Inference stats: --"
+            android:textSize="12sp"
+            android:fontFamily="monospace"
             android:layout_marginBottom="16dp" />
 
         <!-- Status -->

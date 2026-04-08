@@ -133,9 +133,9 @@ edgy-android/
 │   │   ├── privacy/
 │   │   │   ├── PrivacyTier.kt
 │   │   │   └── PrivacyPipeline.kt
-│   │   ├── vocoder/                          # Stage 6
+│   │   ├── vocoder/                          # Stage 5
 │   │   │   └── GriffinLimVocoder.kt
-│   │   ├── sdk/                              # Stage 7
+│   │   ├── sdk/                              # Stage 6
 │   │   │   ├── EdgyAudioProvider.kt
 │   │   │   └── IEdgyAudioSource.aidl
 │   │   └── util/
@@ -282,7 +282,7 @@ Routes output to file, speaker, or internal audio bus.
 writeToWavFile(path: String, pcm: FloatArray, sampleRate: Int)
 writeEmbeddingFile(path: String, output: PrivacyOutput)
 
-// Stage 5+:
+// Stage 7 (optional):
 startSubmixOutput(sampleRate: Int)
   — AudioTrack targeting REMOTE_SUBMIX
 writeAudioChunk(pcm: FloatArray)
@@ -449,76 +449,70 @@ app recompilation.
 
 ---
 
-### Stage 5: REMOTE_SUBMIX Audio Routing
-
-**Goal:** Output processed audio to Android's internal audio bus so cooperating
-apps can receive it.
-
-**Components to build:**
-- AudioTrack output targeting REMOTE_SUBMIX device type
-- MediaProjection permission flow
-- Simple test receiver app (minimal app that reads from AudioPlaybackCapture
-  and plays to speaker or saves to file)
-
-**Verification:**
-1. EDGY app outputs LOW tier audio to REMOTE_SUBMIX
-2. Test receiver app captures it via AudioPlaybackCapture → plays audible speech
-3. End-to-end latency: measure time from mic input to receiver output < 200ms
-4. Test receiver app records 30 seconds → output .wav is intelligible
-5. Switch EDGY to HIGH tier → receiver gets silence (no audio in encoder-only mode)
-   or reconstructed audio if vocoder is implemented (Stage 6)
-6. Test on Android 10, 14, and 16 devices if available
-
-**Exit criteria:** Audio successfully routes from EDGY to a separate receiving
-app via REMOTE_SUBMIX without root.
-
----
-
-### Stage 6: Audio Reconstruction (Vocoder)
+### Stage 5: Audio Reconstruction (Vocoder)
 
 **Goal:** Reconstruct audible speech from VQ embeddings so MODERATE/HIGH tiers
-can output audio, not just embeddings.
+can output audio, not just embeddings. This is a prerequisite for Stages 6 and 7
+— without a vocoder, MODERATE/HIGH tiers produce only embeddings, making audio
+routing and SDK integration meaningless for those tiers.
 
-**Approach options (in order of complexity):**
-
-**Option A: Griffin-Lim (classical, no ML)**
+**Approach: Griffin-Lim (classical, no ML)**
 - Train a small linear layer (64→80) to project VQ embeddings back to mel space
-- Use Griffin-Lim algorithm to reconstruct waveform from mel
-- Quality: robotic but intelligible. Latency: ~10ms. No ONNX model needed.
-- Export the 64→80 projection matrix from the notebook as a .npy file
-
-**Option B: WaveRNN (from EDGY repo — `models.py` Decoder class)**
-- The paper's decoder: single GRU (hidden=896), mu-law 10-bit output at 24kHz
-- Conditioning: BiGRU (hidden=128) takes VQ codes + speaker embedding
-- Autoregressive: generates one sample at a time → inherently slow
-- Export as ONNX and run on device — expect ~200ms+ per 100ms of audio
-- Suitable for offline/batch processing, not real-time
-
-**Option C: Lightweight neural vocoder (HiFi-GAN / LPCNet)**
-- Train separately on LibriSpeech, condition on VQ codes
-- HiFi-GAN v3: ~1MB, generates faster than real-time on mobile CPU
-- Best quality, but requires additional training pipeline
+- Use Griffin-Lim algorithm to reconstruct waveform from estimated mel
+- Quality: robotic but intelligible. Latency: ~10ms per chunk. No ONNX model needed.
+- Export the 64→80 projection matrix from the notebook as `vq_to_mel_projection.npy`
 
 **Components to build:**
-- vocoder/GriffinLimVocoder.kt (Option A) or vocoder/NeuralVocoder.kt (B/C)
+- vocoder/GriffinLimVocoder.kt:
+  ```
+  Constructor(projectionMatrix: Array<FloatArray>, config: ModelConfig)
+    — projectionMatrix: [64, 80] loaded from vq_to_mel_projection.npy
+    — Precompute inverse mel filterbank for Griffin-Lim
+
+  reconstruct(vqEmbedding: Array<FloatArray>): FloatArray
+    — Project VQ embeddings [T', 64] → estimated mel [80, T']
+    — Apply Griffin-Lim iterative phase reconstruction (30 iterations)
+    — Return PCM float [-1, 1]
+
+  reconstructStreaming(vqEmbedding: Array<FloatArray>): FloatArray
+    — Same as above with overlap-add for streaming chunks
+  ```
 - Integration with PrivacyPipeline: MODERATE/HIGH tiers reconstruct audio
-- Output reconstructed audio to file and REMOTE_SUBMIX
+  after encoding, so PrivacyOutput includes `reconstructedAudio: FloatArray?`
+- Output reconstructed audio to file and (later) AudioTrack
+
+**New model artifact:**
+```
+exported_models/
+└── vq_to_mel_projection.npy    # float32 [64, 80] — trained projection matrix
+```
 
 **Verification:**
 1. Reconstructed speech is intelligible (human listening test)
 2. WER (word error rate) of reconstructed vs original < 15% using device ASR
 3. Gender classifier on reconstructed audio mel features → ~50% (privacy preserved)
-4. If real-time: reconstruction latency < 100ms per 100ms chunk
+4. Reconstruction latency < 100ms per 100ms chunk (fits within pipeline budget)
 
 **Exit criteria:** MODERATE/HIGH tiers produce audible speech output. Privacy
 filtering verified on the reconstructed waveform.
 
+> **Note on alternatives considered:** The EDGY paper's WaveRNN decoder
+> (single GRU, hidden=896, autoregressive mu-law at 24kHz) generates one sample
+> at a time — expect ~200ms+ per 100ms of audio. This is unsuitable for real-time
+> use but could be offered as an offline "high quality export" option in Stage 8.
+> HiFi-GAN v3 (~1MB, faster than real-time on mobile) would be the best quality
+> option but requires a separate training pipeline conditioned on EDGY's VQ codes.
+> This is a future upgrade path — the GriffinLimVocoder interface is designed so
+> a NeuralVocoder can be swapped in later without changing the pipeline.
+
 ---
 
-### Stage 7: Audio Provider SDK
+### Stage 6: Audio Provider SDK
 
 **Goal:** Package EDGY as a service that other apps on the device can use as
-an audio source, similar to how Krisp provides a virtual microphone.
+an audio source, similar to how Krisp provides a virtual microphone. This is the
+primary integration path — it works on all API levels (minSdk 26+) and gives any
+cooperating app direct access to privacy-filtered audio.
 
 **Architecture:**
 ```
@@ -552,22 +546,90 @@ an audio source, similar to how Krisp provides a virtual microphone.
       void setPrivacyTier(int tier);
   }
   ```
-- EdgyAudioProvider.kt — bound service implementing the AIDL interface
+- sdk/EdgyAudioProvider.kt — bound service implementing the AIDL interface
 - Streams filtered PCM via ParcelFileDescriptor pipe
-- Client SDK library (AAR) that wraps the AIDL binding for easy integration
+- Test client activity (within the same app or a minimal test app) for verification
 
 **Verification:**
-1. Build a test VoIP app that binds to EDGY service
-2. Test app calls getAudioStream(HIGH) → receives filtered PCM
+1. Test client binds to EDGY service
+2. Test client calls getAudioStream(HIGH) → receives filtered PCM
 3. Feed received PCM into a WebRTC peer connection → remote side hears speech
 4. Gender classifier on the remote recording → ~50% accuracy
 5. Switch tier mid-stream → audio content changes smoothly
 6. EDGY service killed → client detects disconnect, falls back to raw mic
 7. Multiple clients bind simultaneously → each receives independent stream
 
-**Exit criteria:** Third-party app successfully uses EDGY as its audio source
-via the AIDL interface. Privacy filtering verified end-to-end through a real
-VoIP call.
+**Exit criteria:** Test client successfully uses EDGY as its audio source
+via the AIDL interface. Privacy filtering verified end-to-end.
+
+> **Note:** A packaged AAR client SDK library for easy third-party integration
+> is deferred to Stage 8 (Production Hardening). For this stage, the AIDL
+> interface and a test client are sufficient to validate the architecture.
+
+---
+
+### Stage 7: REMOTE_SUBMIX Audio Routing (Optional)
+
+**Goal:** Output processed audio to Android's internal audio bus so cooperating
+apps can receive it without direct AIDL integration.
+
+> **This stage is optional.** Stage 6 (AIDL SDK) provides a superior integration
+> path that works on all API levels. REMOTE_SUBMIX is limited to API 29+ (Android 10),
+> requires the receiving app to explicitly use AudioPlaybackCapture, and will not
+> work with unmodified Zoom/WhatsApp/Teams. It is useful primarily for demos,
+> testing, and scenarios where modifying the receiving app is not possible.
+
+**Components to build:**
+- AudioTrack output targeting REMOTE_SUBMIX device type
+- MediaProjection permission flow (required for AudioPlaybackCapture)
+- Simple test receiver app (minimal app that reads from AudioPlaybackCapture
+  and plays to speaker or saves to file)
+
+**Verification:**
+1. EDGY app outputs LOW tier audio to REMOTE_SUBMIX
+2. Test receiver app captures it via AudioPlaybackCapture → plays audible speech
+3. End-to-end latency: measure time from mic input to receiver output < 200ms
+4. Test receiver app records 30 seconds → output .wav is intelligible
+5. Switch EDGY to HIGH tier → receiver gets reconstructed audio (via Stage 5 vocoder)
+6. Test on available Android 10+ devices
+
+**Exit criteria:** Audio successfully routes from EDGY to a separate receiving
+app via REMOTE_SUBMIX without root.
+
+---
+
+### Alternatives Considered (Stages 5-7)
+
+The original handover ordered these stages as REMOTE_SUBMIX (5) → Vocoder (6) →
+AIDL SDK (7). This was revised based on the following analysis:
+
+**Why Vocoder was moved to Stage 5 (from Stage 6):**
+Without a vocoder, MODERATE/HIGH tiers output only VQ embeddings — not audio.
+This made the original Stage 5 (REMOTE_SUBMIX audio routing) functionally useless
+at those tiers. Moving the vocoder first fixes the dependency: all three tiers
+produce audio before any routing or SDK integration is attempted.
+
+**Why WaveRNN was rejected for real-time:**
+The EDGY paper's WaveRNN decoder (models.py Decoder class) is autoregressive —
+it generates one sample at a time via a single GRU (hidden=896) with mu-law
+10-bit output at 24kHz. On mobile CPU, this translates to ~200ms+ per 100ms of
+audio, making it fundamentally incompatible with real-time processing. Griffin-Lim
+is 20x faster (~10ms) with acceptable quality for a prototype.
+
+**Why AIDL SDK was promoted over REMOTE_SUBMIX:**
+- AIDL works on API 26+ (our minSdk); REMOTE_SUBMIX requires API 29+
+- AIDL provides explicit app binding — any cooperating app can use it
+- REMOTE_SUBMIX requires the receiving app to use AudioPlaybackCapture,
+  which rules out unmodified Zoom, WhatsApp, Teams, and Signal
+- AIDL supports multiple concurrent clients with independent tier selection
+- REMOTE_SUBMIX is retained as Stage 7 (optional) for demos and testing
+
+**Why HiFi-GAN/LPCNet are deferred:**
+These lightweight neural vocoders offer the best quality (~1MB model, real-time
+on mobile) but require a separate training pipeline conditioned on EDGY's VQ
+codes. This is additional ML infrastructure beyond the scope of this prototype.
+The GriffinLimVocoder interface is designed so a NeuralVocoder can be swapped in
+later without pipeline changes.
 
 ---
 
@@ -583,6 +645,9 @@ VoIP call.
 - Model auto-update (check a URL for newer model versions)
 - Speaker enrollment flow (record 10 seconds → compute speaker embedding →
   save for MODERATE tier)
+- Client SDK library (AAR) wrapping the AIDL binding from Stage 6 for
+  easy third-party integration
+- WaveRNN offline export option (high-quality batch reconstruction)
 - Accessibility service integration (for system-wide audio intercept where
   supported by OEM)
 
@@ -637,13 +702,13 @@ If any parity test fails, the build is broken. Fix MelSpectrogramExtractor.
 4. Test on flagship (Snapdragon 8 Gen 3) and mid-range (Snapdragon 6 Gen 1)
 ```
 
-### Integration Tests (Stage 5+)
+### Integration Tests (Stage 6+)
 
 ```
-1. REMOTE_SUBMIX: EDGY → test receiver app → verify audio received
-2. AIDL service: test client binds → receives stream → plays audio
+1. AIDL service: test client binds → receives stream → plays audio
+2. Concurrent clients: 2 apps bound simultaneously → both receive audio
 3. End-to-end latency through full routing chain: < 200ms
-4. Concurrent clients: 2 apps bound simultaneously → both receive audio
+4. REMOTE_SUBMIX (Stage 7, optional): EDGY → test receiver app → verify audio received
 ```
 
 ---
@@ -669,9 +734,9 @@ No Android recompilation needed for model changes.
 
 | Constraint | Impact | Mitigation |
 |-----------|--------|-----------|
-| No Android virtual mic API | Cannot intercept arbitrary apps | REMOTE_SUBMIX for cooperating apps (Stage 5); AIDL service SDK (Stage 7) |
+| No Android virtual mic API | Cannot intercept arbitrary apps | AIDL service SDK (Stage 6, primary); REMOTE_SUBMIX for cooperating apps (Stage 7, optional) |
 | Mel must match Python exactly | Wrong mel = garbage encoder output | Parity tests against Python fixtures; gate all builds on these tests |
 | ONNX model tied to preprocessing | Different training params = different config | model_config.json keeps app in sync; app never hardcodes params |
 | Speaker index for MODERATE | App needs to know which embedding to use | Default to index 0; speaker enrollment flow in Stage 8 |
-| WaveRNN decoder is slow | Cannot reconstruct audio in real-time | Encoder-only through Stage 5; vocoder in Stage 6 (Griffin-Lim or HiFi-GAN) |
-| REMOTE_SUBMIX requires receiver opt-in | Won't work with unmodified Zoom/WhatsApp | AIDL service SDK lets any app integrate; file output always works |
+| WaveRNN decoder is slow | Cannot reconstruct audio in real-time | Encoder-only through Stage 4; Griffin-Lim vocoder in Stage 5; neural vocoder (HiFi-GAN) as future upgrade |
+| REMOTE_SUBMIX requires receiver opt-in | Won't work with unmodified Zoom/WhatsApp | AIDL service SDK (Stage 6) lets any app integrate; file output always works |
