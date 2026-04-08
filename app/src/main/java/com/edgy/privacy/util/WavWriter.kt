@@ -54,7 +54,8 @@ object WavWriter {
             val dataBuffer = ByteBuffer.allocate(pcm.size * 2).order(ByteOrder.LITTLE_ENDIAN)
             for (sample in pcm) {
                 val clamped = sample.coerceIn(-1f, 1f)
-                dataBuffer.putShort((clamped * 32767f).toInt().toShort())
+                val scaled = (clamped * 32768f).toInt().coerceIn(-32768, 32767)
+                dataBuffer.putShort(scaled.toShort())
             }
             fos.write(dataBuffer.array())
         }

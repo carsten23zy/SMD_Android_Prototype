@@ -87,21 +87,29 @@ object DSP {
     }
 
     /**
-     * Pad signal with reflection padding (matching librosa's default).
-     * Pads padSize samples on each side.
+     * Pad signal with reflection padding (matching numpy's reflect mode).
+     * Pads padSize samples on each side. Handles padSize >= signal.size
+     * by wrapping reflections multiple times.
      */
     fun padReflect(signal: FloatArray, padSize: Int): FloatArray {
+        if (signal.isEmpty()) return FloatArray(0)
+        if (signal.size == 1) return FloatArray(1 + 2 * padSize) { signal[0] }
+
         val result = FloatArray(signal.size + 2 * padSize)
-        // Left reflection
-        for (i in 0 until padSize) {
-            result[padSize - 1 - i] = signal[i + 1]
-        }
-        // Copy original
-        System.arraycopy(signal, 0, result, padSize, signal.size)
-        // Right reflection
-        for (i in 0 until padSize) {
-            result[padSize + signal.size + i] = signal[signal.size - 2 - i]
+        for (i in result.indices) {
+            result[i] = signal[reflectIndex(i - padSize, signal.size)]
         }
         return result
+    }
+
+    /**
+     * Map an index into [0, size-1] using reflection at boundaries.
+     */
+    private fun reflectIndex(idx: Int, size: Int): Int {
+        if (size <= 1) return 0
+        val period = 2 * (size - 1)
+        var i = idx % period
+        if (i < 0) i += period
+        return if (i < size) i else period - i
     }
 }

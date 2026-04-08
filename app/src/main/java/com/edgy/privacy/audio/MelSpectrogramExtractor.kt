@@ -60,18 +60,19 @@ class MelSpectrogramExtractor(private val config: ModelConfig) {
         val padSize = nFft / 2
         val padded = DSP.padReflect(preemph, padSize)
 
-        // 3. Frame the signal
-        val frames = DSP.frameSignal(padded, winLength, hopLength)
+        // 3. Frame the signal (use nFft as frame length, matching librosa.stft)
+        val frames = DSP.frameSignal(padded, nFft, hopLength)
         if (frames.isEmpty()) return Array(nMels) { FloatArray(0) }
 
         val numFrames = frames.size
         val melSpec = Array(nMels) { DoubleArray(numFrames) }
+        val winOffset = (nFft - winLength) / 2
 
         for (t in frames.indices) {
-            // 4. Apply Hann window
+            // 4. Apply centered Hann window (librosa center-pads the window to nFft)
             val windowed = DoubleArray(nFft)
             for (i in 0 until winLength) {
-                windowed[i] = frames[t][i].toDouble() * hannWindow[i]
+                windowed[winOffset + i] = frames[t][winOffset + i].toDouble() * hannWindow[i]
             }
             // Zero-pad to nFft (already done by allocating nFft size)
 
@@ -100,7 +101,13 @@ class MelSpectrogramExtractor(private val config: ModelConfig) {
             }
         }
 
-        // 8. Clip: max(mel_db, globalMax - top_db)
+        // 8. If the signal has no meaningful energy (silence), return zeros
+        //    to avoid normalization artifact where silence maps to all-ones
+        if (globalMax < -99.0) {
+            return Array(nMels) { FloatArray(numFrames) }
+        }
+
+        // 9. Clip: max(mel_db, globalMax - top_db)
         val clipMin = globalMax - topDb
         for (m in 0 until nMels) {
             for (t in 0 until numFrames) {
@@ -108,7 +115,7 @@ class MelSpectrogramExtractor(private val config: ModelConfig) {
             }
         }
 
-        // 9. Normalize: mel_db / top_db + 1
+        // 10. Normalize: mel_db / top_db + 1
         val result = Array(nMels) { m ->
             FloatArray(numFrames) { t ->
                 ((melDb[m][t] - clipMin) / topDb).toFloat()
@@ -139,8 +146,8 @@ class MelSpectrogramExtractor(private val config: ModelConfig) {
         val padSize = nFft / 2
         val padded = DSP.padReflect(preemph, padSize)
 
-        // Frame
-        val frames = DSP.frameSignal(padded, winLength, hopLength)
+        // Frame (use nFft as frame length, matching librosa.stft)
+        val frames = DSP.frameSignal(padded, nFft, hopLength)
         if (frames.isEmpty()) {
             overlapBuffer = combined
             return Array(nMels) { FloatArray(0) }
@@ -148,11 +155,12 @@ class MelSpectrogramExtractor(private val config: ModelConfig) {
 
         val numFrames = frames.size
         val melSpec = Array(nMels) { DoubleArray(numFrames) }
+        val winOffset = (nFft - winLength) / 2
 
         for (t in frames.indices) {
             val windowed = DoubleArray(nFft)
             for (i in 0 until winLength) {
-                windowed[i] = frames[t][i].toDouble() * hannWindow[i]
+                windowed[winOffset + i] = frames[t][winOffset + i].toDouble() * hannWindow[i]
             }
 
             fft.realForward(windowed)
@@ -178,6 +186,17 @@ class MelSpectrogramExtractor(private val config: ModelConfig) {
             }
         }
 
+        // Silence threshold
+        if (globalMax < -99.0) {
+            val overlapSize = nFft - hopLength
+            if (combined.size > overlapSize) {
+                overlapBuffer = combined.copyOfRange(combined.size - overlapSize, combined.size)
+            } else {
+                overlapBuffer = combined
+            }
+            return Array(nMels) { FloatArray(numFrames) }
+        }
+
         val clipMin = globalMax - topDb
         val result = Array(nMels) { m ->
             FloatArray(numFrames) { t ->
@@ -186,8 +205,8 @@ class MelSpectrogramExtractor(private val config: ModelConfig) {
             }
         }
 
-        // Save overlap: keep last (winLength - hopLength) samples from the original combined
-        val overlapSize = winLength - hopLength
+        // Save overlap: keep last (nFft - hopLength) samples from the original combined
+        val overlapSize = nFft - hopLength
         if (combined.size > overlapSize) {
             overlapBuffer = combined.copyOfRange(combined.size - overlapSize, combined.size)
         } else {
