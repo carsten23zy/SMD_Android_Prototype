@@ -147,8 +147,10 @@ class GriffinLimVocoderTest {
     @Test
     fun `different embeddings produce different audio`() {
         val vocoder = GriffinLimVocoder(config, projectionMatrix, codebook)
-        val emb1 = Array(10) { FloatArray(64) { 0.2f } }
-        val emb2 = Array(10) { FloatArray(64) { 0.8f } }
+        // Use non-uniform embeddings with different spectral shapes (not just scale).
+        // Uniform values differing only in scale produce identical audio after normalization.
+        val emb1 = Array(10) { FloatArray(64) { d -> 0.1f + 0.4f * (d.toFloat() / 63f) } }
+        val emb2 = Array(10) { FloatArray(64) { d -> 0.9f - 0.4f * (d.toFloat() / 63f) } }
         val audio1 = vocoder.synthesize(emb1)
         val audio2 = vocoder.synthesize(emb2)
 
