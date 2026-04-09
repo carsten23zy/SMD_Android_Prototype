@@ -2,6 +2,7 @@ package com.edgy.privacy.util
 
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.sin
 
 /**
  * Signal processing utilities for audio preprocessing.
@@ -84,6 +85,62 @@ object DSP {
             val clamped = pcm[it].coerceIn(-1f, 1f)
             (clamped * 32767f).toInt().toShort()
         }
+    }
+
+    /**
+     * Resample audio from one sample rate to another using windowed sinc interpolation.
+     *
+     * For downsampling (targetRate < sourceRate), applies a low-pass filter at
+     * targetRate/2 to prevent aliasing. Uses a sinc kernel with Hann window.
+     *
+     * @param pcm Input samples
+     * @param sourceRate Original sample rate (e.g. 96000)
+     * @param targetRate Desired sample rate (e.g. 16000)
+     * @return Resampled audio
+     */
+    fun resample(pcm: FloatArray, sourceRate: Int, targetRate: Int): FloatArray {
+        if (sourceRate == targetRate) return pcm
+        if (pcm.isEmpty()) return pcm
+
+        val ratio = targetRate.toDouble() / sourceRate
+        val outputLen = (pcm.size * ratio).toInt()
+        val result = FloatArray(outputLen)
+
+        // Low-pass cutoff: min of the two Nyquist frequencies
+        val cutoff = minOf(0.5, ratio / 2.0)
+        // Sinc kernel half-width in input samples
+        val halfWidth = 16
+        val scale = 2.0 * cutoff
+
+        for (i in 0 until outputLen) {
+            val srcPos = i / ratio
+            val srcCenter = srcPos.toInt()
+            var sum = 0.0
+            var weightSum = 0.0
+
+            val jStart = maxOf(0, srcCenter - halfWidth)
+            val jEnd = minOf(pcm.size - 1, srcCenter + halfWidth)
+
+            for (j in jStart..jEnd) {
+                val x = srcPos - j
+                // Windowed sinc
+                val sincVal = if (kotlin.math.abs(x) < 1e-8) {
+                    scale
+                } else {
+                    val piX = PI * x
+                    scale * sin(scale * piX) / (scale * piX)
+                }
+                // Hann window over the kernel
+                val winPos = (j - srcCenter + halfWidth).toDouble() / (2 * halfWidth)
+                val window = 0.5 * (1.0 - cos(2.0 * PI * winPos))
+                val w = sincVal * window
+                sum += pcm[j] * w
+                weightSum += w
+            }
+
+            result[i] = if (weightSum > 1e-8) (sum / weightSum).toFloat() else 0f
+        }
+        return result
     }
 
     /**

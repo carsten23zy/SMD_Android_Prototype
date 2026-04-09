@@ -32,6 +32,7 @@ import com.edgy.privacy.ml.ModelManager
 import com.edgy.privacy.privacy.PrivacyOutput
 import com.edgy.privacy.privacy.PrivacyPipeline
 import com.edgy.privacy.privacy.PrivacyTier
+import com.edgy.privacy.util.DSP
 import com.edgy.privacy.util.WavWriter
 import com.edgy.privacy.audio.AudioPlaybackManager
 import com.edgy.privacy.vocoder.GriffinLimVocoder
@@ -99,6 +100,7 @@ class MainActivity : AppCompatActivity() {
     private var playbackManager: AudioPlaybackManager? = null
     private var isListeningLive = false
     private var lastProcessedAudio: FloatArray? = null
+    private var lastProcessedSampleRate: Int = 16000
 
     // State
     private var selectedFileUri: Uri? = null
@@ -593,14 +595,14 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val sampleRate = modelManager?.loadConfig()?.preprocessing?.sampleRate ?: 16000
+        val sampleRate = lastProcessedSampleRate
         val manager = AudioPlaybackManager(sampleRate)
         playbackManager = manager
 
         btnPlayResult.isEnabled = false
         btnStopPlayback.isEnabled = true
         val durationSec = "%.1f".format(audio.size.toFloat() / sampleRate)
-        updateStatus("Playing processed audio (${durationSec}s)...")
+        updateStatus("Playing processed audio (${durationSec}s @ ${sampleRate}Hz)...")
 
         manager.playOneShot(audio) {
             runOnUiThread {
@@ -696,14 +698,26 @@ class MainActivity : AppCompatActivity() {
         processingJob = CoroutineScope(Dispatchers.IO).launch {
             try {
                 val results = StringBuilder()
-                val (sampleRate, pcm) = contentResolver.openInputStream(uri)!!.use {
+                val (fileSampleRate, rawPcm) = contentResolver.openInputStream(uri)!!.use {
                     WavWriter.readWav(it)
                 }
+                val modelSampleRate = modelManager?.loadConfig()?.preprocessing?.sampleRate ?: 16000
                 val fileName = uri.lastPathSegment ?: "selected_file"
                 results.append("=== $fileName ===\n")
-                results.append("Samples: ${pcm.size}, Rate: ${sampleRate}Hz\n")
-                results.append("Duration: ${"%.2f".format(pcm.size.toFloat() / sampleRate)}s\n")
-                results.append("Tier: ${tier.name}\n\n")
+                results.append("Samples: ${rawPcm.size}, Rate: ${fileSampleRate}Hz\n")
+                results.append("Duration: ${"%.2f".format(rawPcm.size.toFloat() / fileSampleRate)}s\n")
+                results.append("Tier: ${tier.name}\n")
+
+                // Resample to model sample rate if needed
+                val pcm: FloatArray
+                if (fileSampleRate != modelSampleRate) {
+                    results.append("Resampling: ${fileSampleRate}Hz → ${modelSampleRate}Hz...")
+                    pcm = DSP.resample(rawPcm, fileSampleRate, modelSampleRate)
+                    results.append(" ${pcm.size} samples\n")
+                } else {
+                    pcm = rawPcm
+                }
+                results.append("\n")
 
                 pipeline?.setTier(tier)
 
@@ -713,22 +727,30 @@ class MainActivity : AppCompatActivity() {
 
                     val outputDir = "${cacheDir.absolutePath}/edgy_output"
                     val prefix = "output_${System.currentTimeMillis()}"
-                    val savedFiles = audioOutputService.writeOutput(outputDir, output, prefix, sampleRate)
+                    val savedFiles = audioOutputService.writeOutput(outputDir, output, prefix, modelSampleRate)
                     results.append("\nSaved files:\n")
                     savedFiles.forEach { results.append("  $it\n") }
 
                     results.append("\n--- Stage 2 Verification ---\n")
                     verifyTierOutput(output, tier, results)
 
-                    // Store audio for playback (raw for LOW, reconstructed for MODERATE/HIGH)
-                    val playableAudio = when (tier) {
-                        PrivacyTier.LOW -> output.rawAudio
-                        else -> output.reconstructedAudio
+                    // Store audio for playback
+                    // LOW tier: use original audio at original rate for faithful playback
+                    // MODERATE/HIGH: reconstructed audio is at model sample rate
+                    val playableAudio: FloatArray?
+                    val playbackRate: Int
+                    if (tier == PrivacyTier.LOW) {
+                        playableAudio = rawPcm
+                        playbackRate = fileSampleRate
+                    } else {
+                        playableAudio = output.reconstructedAudio
+                        playbackRate = modelSampleRate
                     }
                     lastProcessedAudio = playableAudio
+                    lastProcessedSampleRate = playbackRate
 
                     if (playableAudio != null && playableAudio.isNotEmpty()) {
-                        val durSec = "%.1f".format(playableAudio.size.toFloat() / sampleRate)
+                        val durSec = "%.1f".format(playableAudio.size.toFloat() / playbackRate)
                         results.append("\nPlayback: ${durSec}s of audio ready — tap 'Play Result'\n")
                     }
                 } else {
