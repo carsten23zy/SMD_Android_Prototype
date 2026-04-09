@@ -44,6 +44,7 @@ class GriffinLimVocoder(
     private val numBins = nFft / 2 + 1
 
     private val iterations: Int = DEFAULT_ITERATIONS
+    private val downsamplingFactor = config.encoder.downsamplingFactor
 
     // Precomputed Hann window for overlap-add synthesis
     private val hannWindow = DoubleArray(winLength) { n ->
@@ -92,14 +93,34 @@ class GriffinLimVocoder(
         // For now, use direct projection: mel ≈ vqEmb * projWeight
         // Since we don't have the decoder weights, we use a simpler approach:
         // reconstruct mel directly from the codebook lookup.
-        val melSpec = reconstructMelFromEmbedding(vqEmbedding)
+        val melSpecDown = reconstructMelFromEmbedding(vqEmbedding)
+
+        // Step 1b: Upsample mel by encoder downsampling factor.
+        // The encoder downsamples mel frames by 2x (e.g. 1182 → 591).
+        // We need to restore the original mel frame count for correct audio length.
+        val upsampledFrames = numFrames * downsamplingFactor
+        val melSpec = if (downsamplingFactor > 1) {
+            Array(nMels) { m ->
+                DoubleArray(upsampledFrames) { t ->
+                    // Linear interpolation between downsampled frames
+                    val srcPos = t.toDouble() / downsamplingFactor
+                    val lo = srcPos.toInt().coerceIn(0, numFrames - 1)
+                    val hi = (lo + 1).coerceIn(0, numFrames - 1)
+                    val frac = srcPos - lo
+                    melSpecDown[m][lo] * (1.0 - frac) + melSpecDown[m][hi] * frac
+                }
+            }
+        } else {
+            melSpecDown
+        }
+        val outFrames = melSpec[0].size
 
         // Step 2: Mel spectrogram → linear spectrogram via pseudo-inverse
-        // proj is [numBins, nMels], melSpec is [nMels, numFrames]
+        // proj is [numBins, nMels], melSpec is [nMels, outFrames]
         // linear[k, t] = sum_m(proj[k, m] * mel[m, t])
-        val linearSpec = Array(numBins) { DoubleArray(numFrames) }
+        val linearSpec = Array(numBins) { DoubleArray(outFrames) }
         for (k in 0 until numBins) {
-            for (t in 0 until numFrames) {
+            for (t in 0 until outFrames) {
                 var sum = 0.0
                 for (m in 0 until nMels) {
                     sum += proj[k][m].toDouble() * melSpec[m][t]
@@ -110,7 +131,7 @@ class GriffinLimVocoder(
         }
 
         // Step 3: Griffin-Lim phase reconstruction
-        return griffinLim(linearSpec, numFrames)
+        return griffinLim(linearSpec, outFrames)
     }
 
     /**
