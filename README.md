@@ -4,7 +4,7 @@
 
 ### 1.1 EDGY
 
-EDGY is a privacy-preserving voice analysis framework from Imperial College London.
+EDGY is a privacy-preserving voice analysis framework.
 It strips sensitive paralinguistic information (gender, emotion, speaker identity,
 accent, health indicators) from speech using a VQ-VAE encoder whose 512-code
 discrete codebook acts as an information bottleneck. Linguistic content passes
