@@ -674,7 +674,7 @@ class MainActivity : AppCompatActivity() {
     @Suppress("DEPRECATION")
     private fun pickWavFile() {
         val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-            type = "audio/wav"
+            type = "audio/*"
             addCategory(Intent.CATEGORY_OPENABLE)
         }
         try {
