@@ -27,8 +27,9 @@ import kotlin.math.sqrt
  */
 class GriffinLimVocoder(
     private val config: ModelConfig,
-    private val projectionMatrix: Array<FloatArray>?,
-    private val codebook: Array<FloatArray>?
+    projectionMatrix: Array<FloatArray>?,
+    private val codebook: Array<FloatArray>?,
+    melFilterbank: Array<DoubleArray>? = null
 ) {
     companion object {
         private const val TAG = "GriffinLimVocoder"
@@ -52,7 +53,11 @@ class GriffinLimVocoder(
     // FFT instance
     private val fft = DoubleFFT_1D(nFft.toLong())
 
-    val isAvailable: Boolean get() = projectionMatrix != null && codebook != null
+    // Mel pseudo-inverse: [numBins, nMels] — loaded from file or computed from filterbank
+    private val melPseudoInverse: Array<FloatArray>? = projectionMatrix
+        ?: melFilterbank?.let { computeMelPseudoInverse(it) }
+
+    val isAvailable: Boolean get() = melPseudoInverse != null && codebook != null
 
     /**
      * Reconstruct PCM audio from VQ embedding and codebook indices.
@@ -66,11 +71,11 @@ class GriffinLimVocoder(
         codebookIndices: IntArray? = null
     ): FloatArray {
         if (!isAvailable) {
-            Log.w(TAG, "Vocoder unavailable (missing projection matrix or codebook)")
+            Log.w(TAG, "Vocoder unavailable (missing mel pseudo-inverse or codebook)")
             return FloatArray(0)
         }
 
-        val proj = projectionMatrix!!
+        val proj = melPseudoInverse!!
 
         // Step 1: VQ embedding → approximate mel spectrogram
         // vqEmbedding is [T', 64], we need to map it back to [nMels, T']
@@ -296,6 +301,91 @@ class GriffinLimVocoder(
 
         val scale = if (maxAbs > 1e-8) 0.95 / maxAbs else 1.0
         return FloatArray(signal.size) { (signal[it] * scale).toFloat().coerceIn(-1f, 1f) }
+    }
+
+    /**
+     * Compute the mel pseudo-inverse matrix from the mel filterbank.
+     *
+     * Given mel filterbank M [nMels, numBins], computes:
+     *   P = M^T * (M * M^T + eps * I)^{-1}
+     * Result is [numBins, nMels].
+     *
+     * This allows the vocoder to work without a pre-exported projection matrix file.
+     */
+    private fun computeMelPseudoInverse(melFilterbank: Array<DoubleArray>): Array<FloatArray> {
+        val rows = melFilterbank.size        // nMels
+        val cols = melFilterbank[0].size     // numBins
+        val eps = 1e-8
+
+        Log.i(TAG, "Computing mel pseudo-inverse from filterbank [$rows, $cols]")
+
+        // Compute G = M * M^T  [nMels, nMels]
+        val g = Array(rows) { DoubleArray(rows) }
+        for (i in 0 until rows) {
+            for (j in i until rows) {
+                var sum = 0.0
+                for (k in 0 until cols) {
+                    sum += melFilterbank[i][k] * melFilterbank[j][k]
+                }
+                g[i][j] = sum + if (i == j) eps else 0.0
+                g[j][i] = g[i][j]
+            }
+        }
+
+        // Invert G using Gauss-Jordan elimination
+        // Augmented matrix [G | I]
+        val aug = Array(rows) { i ->
+            DoubleArray(2 * rows).also { row ->
+                for (j in 0 until rows) row[j] = g[i][j]
+                row[rows + i] = 1.0
+            }
+        }
+
+        for (col in 0 until rows) {
+            // Find pivot
+            var maxVal = kotlin.math.abs(aug[col][col])
+            var maxRow = col
+            for (row in col + 1 until rows) {
+                val v = kotlin.math.abs(aug[row][col])
+                if (v > maxVal) { maxVal = v; maxRow = row }
+            }
+            if (maxRow != col) {
+                val tmp = aug[col]; aug[col] = aug[maxRow]; aug[maxRow] = tmp
+            }
+
+            val pivot = aug[col][col]
+            if (kotlin.math.abs(pivot) < 1e-15) continue
+
+            // Scale pivot row
+            for (j in 0 until 2 * rows) aug[col][j] /= pivot
+
+            // Eliminate column in all other rows
+            for (row in 0 until rows) {
+                if (row == col) continue
+                val factor = aug[row][col]
+                for (j in 0 until 2 * rows) {
+                    aug[row][j] -= factor * aug[col][j]
+                }
+            }
+        }
+
+        // Extract G^{-1} from augmented matrix
+        val gInv = Array(rows) { i -> DoubleArray(rows) { j -> aug[i][rows + j] } }
+
+        // Compute P = M^T * G^{-1}  [numBins, nMels]
+        val result = Array(cols) { FloatArray(rows) }
+        for (k in 0 until cols) {
+            for (j in 0 until rows) {
+                var sum = 0.0
+                for (i in 0 until rows) {
+                    sum += melFilterbank[i][k] * gInv[i][j]
+                }
+                result[k][j] = sum.toFloat()
+            }
+        }
+
+        Log.i(TAG, "Mel pseudo-inverse computed: [$cols, $rows]")
+        return result
     }
 
     /**

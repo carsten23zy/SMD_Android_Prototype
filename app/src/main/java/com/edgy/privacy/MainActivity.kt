@@ -260,7 +260,7 @@ class MainActivity : AppCompatActivity() {
                 // Stage 5: Load projection matrix and create vocoder
                 val projMatrix = manager.loadProjectionMatrix()
                 val codebook = try { manager.loadCodebook() } catch (e: Exception) { null }
-                val voc = GriffinLimVocoder(config, projMatrix, codebook)
+                val voc = GriffinLimVocoder(config, projMatrix, codebook, extractor.getMelFilterbank())
                 vocoder = voc
 
                 modelManager = manager
@@ -432,7 +432,8 @@ class MainActivity : AppCompatActivity() {
                         val spk = result.speakerEmbeddings ?: emptyArray()
                         val voc = GriffinLimVocoder(
                             result.config!!, result.projectionMatrix,
-                            try { manager.loadCodebook() } catch (e: Exception) { null }
+                            try { manager.loadCodebook() } catch (e: Exception) { null },
+                            result.melExtractor.getMelFilterbank()
                         )
                         vocoder = voc
                         val pl = PrivacyPipeline(result.melExtractor, result.encoder, spk, vocoder = voc)
@@ -516,7 +517,8 @@ class MainActivity : AppCompatActivity() {
                     val spk = result.speakerEmbeddings ?: emptyArray()
                     val voc = GriffinLimVocoder(
                         result.config!!, result.projectionMatrix,
-                        try { manager.loadCodebook() } catch (e: Exception) { null }
+                        try { manager.loadCodebook() } catch (e: Exception) { null },
+                        result.melExtractor.getMelFilterbank()
                     )
                     vocoder = voc
                     val pl = PrivacyPipeline(result.melExtractor, result.encoder, spk, vocoder = voc)

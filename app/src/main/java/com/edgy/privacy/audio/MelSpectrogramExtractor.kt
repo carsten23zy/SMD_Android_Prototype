@@ -32,6 +32,12 @@ class MelSpectrogramExtractor(private val config: ModelConfig) {
     // Precomputed mel filterbank [nMels, nFft/2 + 1]
     private val melFilterbank: Array<DoubleArray> = buildMelFilterbank()
 
+    /**
+     * Get the mel filterbank matrix [nMels, nFft/2+1].
+     * Used by GriffinLimVocoder to compute the pseudo-inverse for mel inversion.
+     */
+    fun getMelFilterbank(): Array<DoubleArray> = melFilterbank
+
     // Precomputed Hann window
     private val hannWindow: DoubleArray = DoubleArray(winLength) { n ->
         0.5 * (1.0 - kotlin.math.cos(2.0 * PI * n / winLength))
