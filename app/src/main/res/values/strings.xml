@@ -19,4 +19,10 @@
     <!-- Stage 4 -->
     <string name="btn_reload_model">Reload Model</string>
     <string name="btn_scan_models">Scan External</string>
+
+    <!-- Stage 5: Audio playback -->
+    <string name="btn_listen_start">Listen Live</string>
+    <string name="btn_listen_stop">Stop Listening</string>
+    <string name="btn_play_result">Play Result</string>
+    <string name="btn_stop_playback">Stop Playback</string>
 </resources>

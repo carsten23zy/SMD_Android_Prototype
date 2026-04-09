@@ -48,6 +48,9 @@ class RealtimePipelineManager(
     private var outputDirectory: String? = null
     private var outputChunkIndex = 0
 
+    // Live audio playback (Stage 5: human listening tests)
+    private var playbackManager: AudioPlaybackManager? = null
+
     /**
      * Get the capture buffer (AudioCaptureService pushes here).
      */
@@ -66,6 +69,14 @@ class RealtimePipelineManager(
     fun setFileOutput(service: AudioOutputService, directory: String) {
         audioOutputService = service
         outputDirectory = directory
+    }
+
+    /**
+     * Enable or disable live audio playback through the speaker.
+     * When enabled, processed audio chunks are fed to AudioTrack in real time.
+     */
+    fun setLivePlayback(manager: AudioPlaybackManager?) {
+        playbackManager = manager
     }
 
     /**
@@ -185,6 +196,9 @@ class RealtimePipelineManager(
             }
 
             try {
+                // Live audio playback if enabled
+                playbackManager?.writeChunk(chunk)
+
                 // File output if configured
                 val dir = outputDirectory
                 val service = audioOutputService

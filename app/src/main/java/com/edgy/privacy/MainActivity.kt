@@ -33,6 +33,7 @@ import com.edgy.privacy.privacy.PrivacyOutput
 import com.edgy.privacy.privacy.PrivacyPipeline
 import com.edgy.privacy.privacy.PrivacyTier
 import com.edgy.privacy.util.WavWriter
+import com.edgy.privacy.audio.AudioPlaybackManager
 import com.edgy.privacy.vocoder.GriffinLimVocoder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -73,6 +74,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnStopCapture: Button
     private lateinit var btnReloadModel: Button
     private lateinit var btnScanModels: Button
+    private lateinit var btnTogglePlayback: Button
+    private lateinit var btnPlayResult: Button
+    private lateinit var btnStopPlayback: Button
     private lateinit var progressBar: ProgressBar
 
     // Core components
@@ -90,6 +94,11 @@ class MainActivity : AppCompatActivity() {
     private var pipelineManager: RealtimePipelineManager? = null
     private val statsHandler = Handler(Looper.getMainLooper())
     private var statsUpdateRunnable: Runnable? = null
+
+    // Stage 5: Audio playback for human listening tests
+    private var playbackManager: AudioPlaybackManager? = null
+    private var isListeningLive = false
+    private var lastProcessedAudio: FloatArray? = null
 
     // State
     private var selectedFileUri: Uri? = null
@@ -126,6 +135,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         stopStatsUpdates()
         stopCapture()
+        playbackManager?.release()
         if (isBound) {
             unbindService(serviceConnection)
             isBound = false
@@ -176,6 +186,9 @@ class MainActivity : AppCompatActivity() {
         btnStopCapture = findViewById(R.id.btnStopCapture)
         btnReloadModel = findViewById(R.id.btnReloadModel)
         btnScanModels = findViewById(R.id.btnScanModels)
+        btnTogglePlayback = findViewById(R.id.btnTogglePlayback)
+        btnPlayResult = findViewById(R.id.btnPlayResult)
+        btnStopPlayback = findViewById(R.id.btnStopPlayback)
         progressBar = findViewById(R.id.progressBar)
     }
 
@@ -205,6 +218,11 @@ class MainActivity : AppCompatActivity() {
         btnReloadModel.setOnClickListener { reloadModel() }
         btnScanModels.setOnClickListener { scanExternalModels() }
         tvModelInfo.setOnClickListener { showDetailedModelInfo() }
+
+        // Stage 5: Audio playback
+        btnTogglePlayback.setOnClickListener { toggleLivePlayback() }
+        btnPlayResult.setOnClickListener { playLastResult() }
+        btnStopPlayback.setOnClickListener { stopResultPlayback() }
     }
 
     // ─── Model Initialization ───
@@ -314,11 +332,18 @@ class MainActivity : AppCompatActivity() {
 
         btnStartCapture.isEnabled = false
         btnStopCapture.isEnabled = true
+        btnTogglePlayback.isEnabled = true
         updateStatus("Capturing at ${getSelectedTier().name} tier...")
-        tvResults.text = "Real-time capture active...\n"
+        tvResults.text = "Real-time capture active...\nTap 'Listen Live' to hear processed audio through speaker.\n"
     }
 
     private fun stopCapture() {
+        // Stop live playback if active
+        if (isListeningLive) {
+            stopLivePlayback()
+        }
+        btnTogglePlayback.isEnabled = false
+
         // Stop pipeline
         pipelineManager?.stop()
 
@@ -526,6 +551,72 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    // ─── Stage 5: Audio Playback for Human Listening Tests ───
+
+    private fun toggleLivePlayback() {
+        if (isListeningLive) {
+            stopLivePlayback()
+        } else {
+            startLivePlayback()
+        }
+    }
+
+    private fun startLivePlayback() {
+        val manager = AudioPlaybackManager(
+            modelManager?.loadConfig()?.preprocessing?.sampleRate ?: 16000
+        )
+        manager.startStreaming()
+        playbackManager = manager
+        pipelineManager?.setLivePlayback(manager)
+        isListeningLive = true
+
+        btnTogglePlayback.text = getString(R.string.btn_listen_stop)
+        updateStatus("Live listening enabled — audio playing through speaker")
+    }
+
+    private fun stopLivePlayback() {
+        pipelineManager?.setLivePlayback(null)
+        playbackManager?.stopStreaming()
+        playbackManager = null
+        isListeningLive = false
+
+        btnTogglePlayback.text = getString(R.string.btn_listen_start)
+        updateStatus("Live listening stopped")
+    }
+
+    private fun playLastResult() {
+        val audio = lastProcessedAudio
+        if (audio == null || audio.isEmpty()) {
+            Toast.makeText(this, "No processed audio to play", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val sampleRate = modelManager?.loadConfig()?.preprocessing?.sampleRate ?: 16000
+        val manager = AudioPlaybackManager(sampleRate)
+        playbackManager = manager
+
+        btnPlayResult.isEnabled = false
+        btnStopPlayback.isEnabled = true
+        val durationSec = "%.1f".format(audio.size.toFloat() / sampleRate)
+        updateStatus("Playing processed audio (${durationSec}s)...")
+
+        manager.playOneShot(audio) {
+            runOnUiThread {
+                btnPlayResult.isEnabled = lastProcessedAudio != null
+                btnStopPlayback.isEnabled = false
+                updateStatus("Playback complete")
+            }
+        }
+    }
+
+    private fun stopResultPlayback() {
+        playbackManager?.stopOneShot()
+        playbackManager = null
+        btnPlayResult.isEnabled = lastProcessedAudio != null
+        btnStopPlayback.isEnabled = false
+        updateStatus("Playback stopped")
+    }
+
     // ─── Stage 1: Process Test WAV ───
 
     private fun processTestWav() {
@@ -563,6 +654,7 @@ class MainActivity : AppCompatActivity() {
                     updateStatus("Processing complete")
                     progressBar.visibility = View.GONE
                     setProcessingEnabled(true)
+                    btnPlayResult.isEnabled = lastProcessedAudio != null && lastProcessedAudio!!.isNotEmpty()
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -625,10 +717,23 @@ class MainActivity : AppCompatActivity() {
 
                     results.append("\n--- Stage 2 Verification ---\n")
                     verifyTierOutput(output, tier, results)
+
+                    // Store audio for playback (raw for LOW, reconstructed for MODERATE/HIGH)
+                    val playableAudio = when (tier) {
+                        PrivacyTier.LOW -> output.rawAudio
+                        else -> output.reconstructedAudio
+                    }
+                    lastProcessedAudio = playableAudio
+
+                    if (playableAudio != null && playableAudio.isNotEmpty()) {
+                        val durSec = "%.1f".format(playableAudio.size.toFloat() / sampleRate)
+                        results.append("\nPlayback: ${durSec}s of audio ready — tap 'Play Result'\n")
+                    }
                 } else {
                     val mel = melExtractor!!.extract(pcm)
                     results.append("Mel spectrogram: [${mel.size}, ${mel[0].size}]\n")
                     results.append("(Encoder not loaded)\n")
+                    lastProcessedAudio = null
                 }
 
                 withContext(Dispatchers.Main) {
@@ -636,6 +741,7 @@ class MainActivity : AppCompatActivity() {
                     updateStatus("Processing complete")
                     progressBar.visibility = View.GONE
                     setProcessingEnabled(true)
+                    btnPlayResult.isEnabled = lastProcessedAudio != null && lastProcessedAudio!!.isNotEmpty()
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -681,6 +787,13 @@ class MainActivity : AppCompatActivity() {
                     pipeline?.setTier(tier)
                     val output = pipeline!!.processChunk(pcm)
                     results.append("[${tier.name}] ${output.summary()}")
+                }
+                // Store last tier's audio for playback (use current selected tier)
+                pipeline?.setTier(getSelectedTier())
+                val playbackOutput = pipeline!!.processChunk(pcm)
+                lastProcessedAudio = when (getSelectedTier()) {
+                    PrivacyTier.LOW -> playbackOutput.rawAudio
+                    else -> playbackOutput.reconstructedAudio
                 }
             } catch (e: Exception) {
                 results.append("Encoder error: ${e.message}\n")

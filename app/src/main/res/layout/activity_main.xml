@@ -99,6 +99,15 @@
 
         </LinearLayout>
 
+        <!-- Live playback toggle -->
+        <Button
+            android:id="@+id/btnTogglePlayback"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/btn_listen_start"
+            android:enabled="false"
+            android:layout_marginBottom="8dp" />
+
         <!-- Live latency display -->
         <TextView
             android:id="@+id/tvLatency"
@@ -148,7 +157,34 @@
             android:layout_height="wrap_content"
             android:text="@string/btn_process_file"
             android:enabled="false"
-            android:layout_marginBottom="16dp" />
+            android:layout_marginBottom="8dp" />
+
+        <!-- Audio playback for processed file results -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="16dp">
+
+            <Button
+                android:id="@+id/btnPlayResult"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/btn_play_result"
+                android:enabled="false"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/btnStopPlayback"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/btn_stop_playback"
+                android:enabled="false"
+                android:layout_marginStart="4dp" />
+
+        </LinearLayout>
 
         <!-- Stage 4: Model management -->
         <TextView
