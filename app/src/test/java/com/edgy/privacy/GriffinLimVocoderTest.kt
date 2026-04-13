@@ -1,27 +1,31 @@
 package com.edgy.privacy
 
+import com.edgy.privacy.audio.MelSpectrogramExtractor
 import com.edgy.privacy.ml.EncoderConfig
 import com.edgy.privacy.ml.FilesConfig
 import com.edgy.privacy.ml.ModelConfig
 import com.edgy.privacy.ml.OnnxSettings
 import com.edgy.privacy.ml.PreprocessingConfig
 import com.edgy.privacy.vocoder.GriffinLimVocoder
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import kotlin.math.PI
+import kotlin.math.sin
 
 /**
- * Unit tests for Griffin-Lim vocoder.
+ * Unit tests for [GriffinLimVocoder].
+ *
+ * The vocoder consumes the same normalized log-mel that the encoder receives,
+ * so these tests build mels via [MelSpectrogramExtractor] and verify that
+ * synthesis returns plausible audio.
  */
 class GriffinLimVocoderTest {
 
     private lateinit var config: ModelConfig
-
-    // Simple projection matrix [numBins=1025, nMels=80]
-    private lateinit var projectionMatrix: Array<FloatArray>
-
-    // Simple codebook [512, 64]
-    private lateinit var codebook: Array<FloatArray>
+    private lateinit var melExtractor: MelSpectrogramExtractor
+    private lateinit var vocoder: GriffinLimVocoder
 
     @Before
     fun setup() {
@@ -45,8 +49,7 @@ class GriffinLimVocoderTest {
                 encoderFp32 = "encoder.onnx",
                 encoderInt8 = "encoder_int8.onnx",
                 codebook = "codebook.npy",
-                speakerEmbeddings = "speaker_embeddings.npy",
-                projectionMatrix = "mel_pseudo_inverse.npy"
+                speakerEmbeddings = "speaker_embeddings.npy"
             ),
             onnxSettings = OnnxSettings(
                 intraOpNumThreads = 2,
@@ -56,111 +59,85 @@ class GriffinLimVocoderTest {
             )
         )
 
-        val numBins = 1025
-        val nMels = 80
+        melExtractor = MelSpectrogramExtractor(config)
+        // Use few iterations to keep tests fast; momentum=0 disables fast-Griffin-Lim.
+        vocoder = GriffinLimVocoder(
+            config,
+            melExtractor.getMelFilterbank(),
+            iterations = 4,
+            momentum = 0.0
+        )
+    }
 
-        // Identity-like projection (scaled down for stability)
-        projectionMatrix = Array(numBins) { k ->
-            FloatArray(nMels) { m ->
-                if (k % (numBins / nMels) == m) 0.01f else 0.0f
-            }
-        }
-
-        codebook = Array(512) { i ->
-            FloatArray(64) { d -> ((i * 64 + d) % 100) / 100f }
+    private fun sineWave(durationSec: Float, freqHz: Float): FloatArray {
+        val sr = config.preprocessing.sampleRate
+        val n = (durationSec * sr).toInt()
+        return FloatArray(n) { i ->
+            (0.5 * sin(2.0 * PI * freqHz * i / sr)).toFloat()
         }
     }
 
     @Test
-    fun `vocoder isAvailable when projection and codebook present`() {
-        val vocoder = GriffinLimVocoder(config, projectionMatrix, codebook)
+    fun `vocoder is always available`() {
         assertTrue(vocoder.isAvailable)
     }
 
     @Test
-    fun `vocoder unavailable without projection matrix`() {
-        val vocoder = GriffinLimVocoder(config, null, codebook)
-        assertFalse(vocoder.isAvailable)
+    fun `synthesize returns empty for empty mel`() {
+        val empty = Array(config.preprocessing.nMels) { FloatArray(0) }
+        assertEquals(0, vocoder.synthesize(empty).size)
     }
 
     @Test
-    fun `vocoder unavailable without codebook`() {
-        val vocoder = GriffinLimVocoder(config, projectionMatrix, null)
-        assertFalse(vocoder.isAvailable)
-    }
+    fun `synthesize round-trips a sine wave to non-empty audio in range`() {
+        val pcm = sineWave(0.25f, 440f)
+        val mel = melExtractor.extract(pcm)
 
-    @Test
-    fun `synthesize returns empty when unavailable`() {
-        val vocoder = GriffinLimVocoder(config, null, null)
-        val emb = Array(10) { FloatArray(64) { 0.5f } }
-        val result = vocoder.synthesize(emb)
-        assertTrue(result.isEmpty())
-    }
+        val audio = vocoder.synthesize(mel)
 
-    @Test
-    fun `synthesize returns non-empty audio from valid embedding`() {
-        val vocoder = GriffinLimVocoder(config, projectionMatrix, codebook)
-        val numFrames = 20
-        val embedding = Array(numFrames) { FloatArray(64) { 0.3f } }
-        val audio = vocoder.synthesize(embedding)
-        assertTrue("Expected non-empty audio, got ${audio.size} samples", audio.isNotEmpty())
-    }
-
-    @Test
-    fun `synthesized audio is within valid range`() {
-        val vocoder = GriffinLimVocoder(config, projectionMatrix, codebook)
-        val embedding = Array(10) { FloatArray(64) { 0.5f } }
-        val audio = vocoder.synthesize(embedding)
+        assertTrue("Expected non-empty reconstructed audio", audio.isNotEmpty())
         for (sample in audio) {
             assertTrue("Sample $sample out of range", sample in -1f..1f)
         }
     }
 
     @Test
-    fun `synthesizeFromIndices uses codebook lookup`() {
-        val vocoder = GriffinLimVocoder(config, projectionMatrix, codebook)
-        val indices = IntArray(10) { it % 512 }
-        val audio = vocoder.synthesizeFromIndices(indices)
-        assertTrue("Expected non-empty audio from indices", audio.isNotEmpty())
-        for (sample in audio) {
-            assertTrue("Sample $sample out of range", sample in -1f..1f)
-        }
+    fun `output length scales with number of mel frames`() {
+        val short = melExtractor.extract(sineWave(0.1f, 440f))
+        val long = melExtractor.extract(sineWave(0.4f, 440f))
+
+        val shortAudio = vocoder.synthesize(short)
+        val longAudio = vocoder.synthesize(long)
+
+        assertTrue(
+            "Longer mel should yield longer audio (${shortAudio.size} vs ${longAudio.size})",
+            longAudio.size > shortAudio.size
+        )
     }
 
     @Test
-    fun `synthesizeFromIndices clamps out-of-range indices`() {
-        val vocoder = GriffinLimVocoder(config, projectionMatrix, codebook)
-        val indices = intArrayOf(-1, 0, 511, 999, 5)
-        // Should not throw — indices are clamped
-        val audio = vocoder.synthesizeFromIndices(indices)
-        assertTrue(audio.isNotEmpty())
-    }
+    fun `different mels produce different audio`() {
+        val melLow = melExtractor.extract(sineWave(0.25f, 220f))
+        val melHigh = melExtractor.extract(sineWave(0.25f, 880f))
 
-    @Test
-    fun `output length scales with number of frames`() {
-        val vocoder = GriffinLimVocoder(config, projectionMatrix, codebook)
-        val small = vocoder.synthesize(Array(5) { FloatArray(64) { 0.3f } })
-        val large = vocoder.synthesize(Array(50) { FloatArray(64) { 0.3f } })
-        assertTrue("Larger input should produce longer audio", large.size > small.size)
-    }
+        val a1 = vocoder.synthesize(melLow)
+        val a2 = vocoder.synthesize(melHigh)
 
-    @Test
-    fun `different embeddings produce different audio`() {
-        val vocoder = GriffinLimVocoder(config, projectionMatrix, codebook)
-        // Use non-uniform embeddings with different spectral shapes (not just scale).
-        // Uniform values differing only in scale produce identical audio after normalization.
-        val emb1 = Array(10) { FloatArray(64) { d -> 0.1f + 0.4f * (d.toFloat() / 63f) } }
-        val emb2 = Array(10) { FloatArray(64) { d -> 0.9f - 0.4f * (d.toFloat() / 63f) } }
-        val audio1 = vocoder.synthesize(emb1)
-        val audio2 = vocoder.synthesize(emb2)
-
-        // They should differ (not all zeros or identical)
-        val minLen = minOf(audio1.size, audio2.size)
+        val n = minOf(a1.size, a2.size)
         var maxDiff = 0f
-        for (i in 0 until minLen) {
-            val diff = kotlin.math.abs(audio1[i] - audio2[i])
-            if (diff > maxDiff) maxDiff = diff
+        for (i in 0 until n) {
+            val d = kotlin.math.abs(a1[i] - a2[i])
+            if (d > maxDiff) maxDiff = d
         }
-        assertTrue("Different embeddings should produce different audio (maxDiff=$maxDiff)", maxDiff > 0.001f)
+        assertTrue(
+            "Different mels should yield different audio (maxDiff=$maxDiff)",
+            maxDiff > 0.001f
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `synthesize rejects mismatched mel dimensions`() {
+        val wrong = Array(config.preprocessing.nMels - 1) { FloatArray(10) }
+        vocoder.synthesize(wrong)
     }
 }

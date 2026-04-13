@@ -5,35 +5,40 @@ import com.edgy.privacy.ml.ModelConfig
 import com.edgy.privacy.util.DSP
 import org.jtransforms.fft.DoubleFFT_1D
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
-import kotlin.math.max
+import kotlin.math.pow
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Griffin-Lim vocoder: reconstructs time-domain audio from VQ embeddings.
+ * Griffin-Lim vocoder: reconstructs time-domain audio directly from a
+ * normalized log-mel spectrogram — the same representation produced by
+ * [com.edgy.privacy.audio.MelSpectrogramExtractor] and consumed by the encoder.
+ *
+ * This mirrors `reconstruct_wav_griffinlim` in `EDGY_ExportedModels_Inference.ipynb`,
+ * which feeds the original log-mel directly into Griffin-Lim — the decoder does
+ * not need any encoder output (VQ embeddings or codebook indices).
  *
  * Pipeline:
- *   VQ embedding [T', 64] → projection → mel spectrogram [nMels, T']
- *   → pseudo-inverse → linear spectrogram [nFft/2+1, T']
- *   → Griffin-Lim iterative phase estimation → PCM audio
- *
- * The pseudo-inverse matrix converts mel spectrograms back to approximate
- * linear-frequency spectrograms. It is precomputed as:
- *   P = M^T * (M*M^T + eps*I)^{-1}
- * where M is the [nMels, nFft/2+1] mel filterbank.
- *
- * If the projection matrix is not available, the vocoder returns silence
- * (graceful fallback).
+ *   normalized log-mel [nMels, T]
+ *     → denormalize to dB:  mel_db = (mel_norm - 1) * top_db
+ *     → dB → amplitude:     mel_amp = 10^(mel_db / 20)
+ *     → mel pseudo-inverse: linear_amp = max(0, M⁺ · mel_amp)
+ *     → Griffin-Lim phase reconstruction (with momentum)
+ *     → de-emphasis (inverse of analysis pre-emphasis)
+ *     → peak-normalize to 0.98
  */
 class GriffinLimVocoder(
     private val config: ModelConfig,
-    projectionMatrix: Array<FloatArray>?,
-    private val codebook: Array<FloatArray>?,
-    melFilterbank: Array<DoubleArray>? = null
+    melFilterbank: Array<DoubleArray>,
+    private val iterations: Int = DEFAULT_ITERATIONS,
+    private val momentum: Double = DEFAULT_MOMENTUM
 ) {
     companion object {
         private const val TAG = "GriffinLimVocoder"
-        private const val DEFAULT_ITERATIONS = 30
+        const val DEFAULT_ITERATIONS = 32
+        const val DEFAULT_MOMENTUM = 0.99
     }
 
     private val sampleRate = config.preprocessing.sampleRate
@@ -41,173 +46,163 @@ class GriffinLimVocoder(
     private val nMels = config.preprocessing.nMels
     private val hopLength = config.preprocessing.hopLength
     private val winLength = config.preprocessing.winLength
+    private val topDb = config.preprocessing.topDb.toDouble()
+    private val preemphCoeff = config.preprocessing.preemph
     private val numBins = nFft / 2 + 1
 
-    private val iterations: Int = DEFAULT_ITERATIONS
+    // Mel pseudo-inverse [numBins, nMels], computed once from the analysis filterbank.
+    private val melPseudoInverse: Array<FloatArray> = computeMelPseudoInverse(melFilterbank)
 
-    // Precomputed Hann window for overlap-add synthesis
-    private val hannWindow = DoubleArray(winLength) { n ->
-        0.5 * (1.0 - cos(2.0 * PI * n / winLength))
+    // Hann window of length winLength, zero-padded to nFft and centered — matches
+    // librosa.stft when n_fft > win_length.
+    private val paddedWindow: DoubleArray = DoubleArray(nFft).also { buf ->
+        val winOffset = (nFft - winLength) / 2
+        for (i in 0 until winLength) {
+            buf[winOffset + i] = 0.5 * (1.0 - cos(2.0 * PI * i / winLength))
+        }
     }
 
-    // FFT instance
     private val fft = DoubleFFT_1D(nFft.toLong())
 
-    // Mel pseudo-inverse: [numBins, nMels] — loaded from file or computed from filterbank
-    private val melPseudoInverse: Array<FloatArray>? = projectionMatrix
-        ?: melFilterbank?.let { computeMelPseudoInverse(it) }
-
-    val isAvailable: Boolean get() = melPseudoInverse != null && codebook != null
+    /** Vocoder is always available — no external decoder weights required. */
+    val isAvailable: Boolean get() = true
 
     /**
-     * Reconstruct PCM audio from VQ embedding and codebook indices.
+     * Reconstruct PCM audio from a normalized log-mel spectrogram.
      *
-     * @param vqEmbedding [T', embeddingDim] VQ-quantized embeddings
-     * @param codebookIndices [T'] indices into the codebook (unused if vqEmbedding provided directly)
-     * @return PCM float samples in [-1, 1] range, or empty array if vocoder unavailable
+     * @param logMelNorm Normalized log-mel of shape [nMels, T] in roughly [0, 1],
+     *                   matching [com.edgy.privacy.audio.MelSpectrogramExtractor.extract].
+     * @return PCM float samples in [-1, 1] (peak-normalized to 0.98).
      */
-    fun synthesize(
-        vqEmbedding: Array<FloatArray>,
-        codebookIndices: IntArray? = null
-    ): FloatArray {
-        if (!isAvailable) {
-            Log.w(TAG, "Vocoder unavailable (missing mel pseudo-inverse or codebook)")
-            return FloatArray(0)
+    fun synthesize(logMelNorm: Array<FloatArray>): FloatArray {
+        if (logMelNorm.isEmpty() || logMelNorm[0].isEmpty()) return FloatArray(0)
+        require(logMelNorm.size == nMels) {
+            "Expected log-mel with $nMels rows, got ${logMelNorm.size}"
         }
 
-        val proj = melPseudoInverse!!
+        val numFrames = logMelNorm[0].size
 
-        // Step 1: VQ embedding → approximate mel spectrogram
-        // vqEmbedding is [T', 64], we need to map it back to [nMels, T']
-        // The VQ embedding IS the encoder's quantized representation of the mel.
-        // We project it back: mel_approx[m, t] = sum_d(embedding[t, d] * W[m, d])
-        // But we don't have a trained decoder — so we use codebook indices to
-        // look up codebook vectors, which approximate the encoded mel frames.
-        val numFrames = vqEmbedding.size
+        // 1. Denormalize to amplitude mel.
+        //    notebook: logmel_db = (logmel_norm - 1) * top_db; mel_amp = db_to_amplitude(db)
+        val melAmp = Array(nMels) { m ->
+            DoubleArray(numFrames) { t ->
+                val db = (logMelNorm[m][t].toDouble() - 1.0) * topDb
+                10.0.pow(db / 20.0)
+            }
+        }
 
-        // Step 1a: Reconstruct mel spectrogram from VQ embeddings
-        // Each VQ embedding row [64] is projected to mel space [nMels]
-        // We need a simple linear projection: since the encoder compressed mel→64d,
-        // we estimate mel by treating the 64d embedding as a compressed mel frame.
-        // For now, use direct projection: mel ≈ vqEmb * projWeight
-        // Since we don't have the decoder weights, we use a simpler approach:
-        // reconstruct mel directly from the codebook lookup.
-        val melSpec = reconstructMelFromEmbedding(vqEmbedding)
+        // 2. Mel → linear magnitude via pseudo-inverse (clamped to non-negative).
+        val linearSpec = Array(numBins) { k ->
+            DoubleArray(numFrames) { t ->
+                var sum = 0.0
+                val row = melPseudoInverse[k]
+                for (m in 0 until nMels) {
+                    sum += row[m].toDouble() * melAmp[m][t]
+                }
+                if (sum > 0.0) sum else 0.0
+            }
+        }
 
-        // Step 2: Mel spectrogram → linear spectrogram via pseudo-inverse
-        // proj is [numBins, nMels], melSpec is [nMels, numFrames]
-        // linear[k, t] = sum_m(proj[k, m] * mel[m, t])
-        val linearSpec = Array(numBins) { DoubleArray(numFrames) }
+        // 3. Griffin-Lim phase reconstruction.
+        val signal = griffinLim(linearSpec)
+
+        // 4. De-emphasis (inverse of analysis pre-emphasis).
+        val deemphasized = DSP.applyDeemphasis(signal, preemphCoeff)
+
+        // 5. Peak-normalize to 0.98.
+        return peakNormalize(deemphasized, 0.98f)
+    }
+
+    /**
+     * Griffin-Lim with momentum, matching librosa.griffinlim defaults.
+     */
+    private fun griffinLim(magnitudes: Array<DoubleArray>): FloatArray {
+        val numFrames = magnitudes[0].size
+        val signalLen = (numFrames - 1) * hopLength + nFft
+
+        // Initialize phase randomly (deterministic seed for reproducibility).
+        val random = java.util.Random(0L)
+        var angleRe = Array(numBins) { DoubleArray(numFrames) }
+        var angleIm = Array(numBins) { DoubleArray(numFrames) }
         for (k in 0 until numBins) {
             for (t in 0 until numFrames) {
-                var sum = 0.0
-                for (m in 0 until nMels) {
-                    sum += proj[k][m].toDouble() * melSpec[m][t]
-                }
-                // Clamp to non-negative (magnitudes can't be negative)
-                linearSpec[k][t] = max(0.0, sum)
+                val phi = 2.0 * PI * random.nextDouble()
+                angleRe[k][t] = cos(phi)
+                angleIm[k][t] = sin(phi)
             }
         }
 
-        // Step 3: Griffin-Lim phase reconstruction
-        return griffinLim(linearSpec, numFrames)
-    }
+        // Previous STFT estimate, used by momentum update.
+        var prevRe = Array(numBins) { DoubleArray(numFrames) }
+        var prevIm = Array(numBins) { DoubleArray(numFrames) }
 
-    /**
-     * Reconstruct mel spectrogram from VQ embedding vectors.
-     *
-     * The VQ embedding [T', 64] represents compressed mel frames. Since we don't
-     * have a learned decoder, we use a simple approach: normalize the embedding
-     * energy and spread it across mel bins proportionally.
-     *
-     * The embedding dimension (64) is close to nMels (80), so we can do a
-     * straightforward zero-padded mapping with interpolation.
-     */
-    private fun reconstructMelFromEmbedding(vqEmbedding: Array<FloatArray>): Array<DoubleArray> {
-        val numFrames = vqEmbedding.size
-        val embDim = if (numFrames > 0) vqEmbedding[0].size else 0
-        val melSpec = Array(nMels) { DoubleArray(numFrames) }
+        val signalScratch = DoubleArray(signalLen)
+        val windowSumScratch = DoubleArray(signalLen)
+        val newRe = Array(numBins) { DoubleArray(numFrames) }
+        val newIm = Array(numBins) { DoubleArray(numFrames) }
 
-        for (t in 0 until numFrames) {
-            val emb = vqEmbedding[t]
+        val mFactor = momentum / (1.0 + momentum)
 
-            // Linear interpolation from embDim → nMels
-            for (m in 0 until nMels) {
-                val srcIdx = m.toDouble() * (embDim - 1) / (nMels - 1)
-                val lo = srcIdx.toInt().coerceIn(0, embDim - 2)
-                val hi = lo + 1
-                val frac = srcIdx - lo
-                val value = emb[lo] * (1.0 - frac) + emb[hi] * frac
-
-                // Convert from embedding space back to power: exp(value) approximation
-                // The mel values were originally in [0, 1] normalized dB range
-                // We reconstruct approximate power: 10^((value * topDb + clipMin) / 10)
-                // Simplified: treat embedding values as normalized mel magnitudes
-                melSpec[m][t] = max(0.0, value.toDouble())
-            }
-        }
-
-        return melSpec
-    }
-
-    /**
-     * Griffin-Lim iterative phase estimation.
-     *
-     * Given magnitude-only spectrogram |S|[numBins, T'], estimates phase
-     * by alternating between time and frequency domains.
-     *
-     * @param magnitudes [numBins][numFrames] magnitude spectrogram
-     * @param numFrames number of STFT frames
-     * @return PCM samples
-     */
-    private fun griffinLim(magnitudes: Array<DoubleArray>, numFrames: Int): FloatArray {
-        // Output signal length
-        val signalLen = (numFrames - 1) * hopLength + winLength
-
-        // Initialize with random phase
-        val random = java.util.Random(42)
-        var phase = Array(numBins) { DoubleArray(numFrames) { random.nextDouble() * 2 * PI } }
-
-        // Iterative Griffin-Lim
         for (iter in 0 until iterations) {
-            // Construct complex STFT: S = |S| * exp(j*phase)
-            // Inverse STFT → signal
-            val signal = istft(magnitudes, phase, signalLen)
+            // y = istft(|S| * angles)
+            istftInto(magnitudes, angleRe, angleIm, signalScratch, windowSumScratch, signalLen)
 
-            // If last iteration, return the signal
-            if (iter == iterations - 1) {
-                return normalizeAndConvert(signal)
+            // newC = stft(y)
+            stftInto(signalScratch, signalLen, newRe, newIm)
+
+            // angles = newC - mFactor * prev; normalize to unit modulus.
+            for (k in 0 until numBins) {
+                val nrK = newRe[k]; val niK = newIm[k]
+                val prK = prevRe[k]; val piK = prevIm[k]
+                val arK = angleRe[k]; val aiK = angleIm[k]
+                for (t in 0 until numFrames) {
+                    val re = nrK[t] - mFactor * prK[t]
+                    val im = niK[t] - mFactor * piK[t]
+                    val mag = sqrt(re * re + im * im) + 1e-16
+                    arK[t] = re / mag
+                    aiK[t] = im / mag
+                    // Save current STFT estimate for next iteration's momentum term.
+                    prK[t] = nrK[t]
+                    piK[t] = niK[t]
+                }
             }
-
-            // Forward STFT to get new phase estimate
-            phase = stftPhase(signal)
         }
 
-        // Should not reach here
-        return FloatArray(signalLen)
+        // Final synthesis with the last phase estimate.
+        istftInto(magnitudes, angleRe, angleIm, signalScratch, windowSumScratch, signalLen)
+
+        // Trim center-padding (librosa center=True): drop nFft/2 from each side.
+        val pad = nFft / 2
+        val outLen = (signalLen - 2 * pad).coerceAtLeast(0)
+        val output = FloatArray(outLen)
+        for (i in 0 until outLen) {
+            output[i] = signalScratch[i + pad].toFloat()
+        }
+        return output
     }
 
     /**
-     * Inverse STFT: complex spectrogram → time-domain signal via overlap-add.
+     * Inverse STFT via overlap-add. Writes into [signalOut].
      */
-    private fun istft(
+    private fun istftInto(
         magnitudes: Array<DoubleArray>,
-        phase: Array<DoubleArray>,
+        angleRe: Array<DoubleArray>,
+        angleIm: Array<DoubleArray>,
+        signalOut: DoubleArray,
+        windowSumOut: DoubleArray,
         signalLen: Int
-    ): DoubleArray {
-        val signal = DoubleArray(signalLen)
-        val windowSum = DoubleArray(signalLen)
+    ) {
+        java.util.Arrays.fill(signalOut, 0.0)
+        java.util.Arrays.fill(windowSumOut, 0.0)
         val numFrames = magnitudes[0].size
+        val complexFrame = DoubleArray(nFft * 2)
 
         for (t in 0 until numFrames) {
-            // Build complex spectrum for this frame
-            val complexFrame = DoubleArray(nFft * 2)
+            java.util.Arrays.fill(complexFrame, 0.0)
             for (k in 0 until numBins) {
                 val mag = magnitudes[k][t]
-                val phi = phase[k][t]
-                val re = mag * cos(phi)
-                val im = mag * kotlin.math.sin(phi)
-
+                val re = mag * angleRe[k][t]
+                val im = mag * angleIm[k][t]
                 if (k == 0) {
                     complexFrame[0] = re
                     complexFrame[1] = 0.0
@@ -217,109 +212,94 @@ class GriffinLimVocoder(
                 } else {
                     complexFrame[2 * k] = re
                     complexFrame[2 * k + 1] = im
-                    // Conjugate symmetric for negative frequencies
+                    // Hermitian symmetric mirror for negative frequencies.
                     complexFrame[2 * (nFft - k)] = re
                     complexFrame[2 * (nFft - k) + 1] = -im
                 }
             }
 
-            // Inverse FFT
             fft.complexInverse(complexFrame, true)
 
-            // Extract real part, apply window, overlap-add
             val frameStart = t * hopLength
-            for (n in 0 until winLength) {
+            for (n in 0 until nFft) {
                 val idx = frameStart + n
                 if (idx < signalLen) {
-                    signal[idx] += complexFrame[2 * n] * hannWindow[n]
-                    windowSum[idx] += hannWindow[n] * hannWindow[n]
+                    val w = paddedWindow[n]
+                    signalOut[idx] += complexFrame[2 * n] * w
+                    windowSumOut[idx] += w * w
                 }
             }
         }
 
-        // Normalize by window sum (avoid division by zero)
-        for (i in signal.indices) {
-            if (windowSum[i] > 1e-8) {
-                signal[i] /= windowSum[i]
-            }
+        for (i in 0 until signalLen) {
+            if (windowSumOut[i] > 1e-8) signalOut[i] /= windowSumOut[i]
         }
-
-        return signal
     }
 
     /**
-     * Forward STFT to extract phase from a time-domain signal.
-     * Returns phase[numBins][numFrames].
+     * Forward STFT into preallocated complex buffers.
      */
-    private fun stftPhase(signal: DoubleArray): Array<DoubleArray> {
-        val numFrames = (signal.size - winLength) / hopLength + 1
-        val phase = Array(numBins) { DoubleArray(numFrames) }
+    private fun stftInto(
+        signal: DoubleArray,
+        signalLen: Int,
+        outRe: Array<DoubleArray>,
+        outIm: Array<DoubleArray>
+    ) {
+        val numFrames = outRe[0].size
+        val frame = DoubleArray(nFft)
 
         for (t in 0 until numFrames) {
             val frameStart = t * hopLength
-            val windowed = DoubleArray(nFft)
-            for (n in 0 until winLength) {
+            for (n in 0 until nFft) {
                 val idx = frameStart + n
-                if (idx < signal.size) {
-                    windowed[n] = signal[idx] * hannWindow[n]
-                }
+                frame[n] = if (idx < signalLen) signal[idx] * paddedWindow[n] else 0.0
             }
 
-            // Forward FFT using realForward
-            fft.realForward(windowed)
+            fft.realForward(frame)
 
-            // Extract phase from JTransforms packed format:
-            // [Re(0), Re(N/2), Re(1), Im(1), Re(2), Im(2), ...]
-            // Bin 0: DC
-            phase[0][t] = if (windowed[0] >= 0) 0.0 else PI
-
-            // Bin N/2: Nyquist
-            phase[numBins - 1][t] = if (windowed[1] >= 0) 0.0 else PI
-
-            // Bins 1..N/2-1
+            // JTransforms packs realForward as: [Re(0), Re(N/2), Re(1), Im(1), Re(2), Im(2), ...]
+            outRe[0][t] = frame[0]
+            outIm[0][t] = 0.0
+            outRe[numBins - 1][t] = frame[1]
+            outIm[numBins - 1][t] = 0.0
             for (k in 1 until numBins - 1) {
-                val re = windowed[2 * k]
-                val im = windowed[2 * k + 1]
-                phase[k][t] = kotlin.math.atan2(im, re)
+                outRe[k][t] = frame[2 * k]
+                outIm[k][t] = frame[2 * k + 1]
             }
         }
-
-        return phase
     }
 
-    /**
-     * Normalize signal to [-1, 1] range and convert to FloatArray.
-     */
-    private fun normalizeAndConvert(signal: DoubleArray): FloatArray {
-        if (signal.isEmpty()) return FloatArray(0)
-
-        var maxAbs = 0.0
+    private fun peakNormalize(signal: FloatArray, target: Float): FloatArray {
+        if (signal.isEmpty()) return signal
+        var peak = 0f
         for (s in signal) {
-            val abs = kotlin.math.abs(s)
-            if (abs > maxAbs) maxAbs = abs
+            val a = abs(s)
+            if (a > peak) peak = a
         }
-
-        val scale = if (maxAbs > 1e-8) 0.95 / maxAbs else 1.0
-        return FloatArray(signal.size) { (signal[it] * scale).toFloat().coerceIn(-1f, 1f) }
+        if (peak < 1e-8f) return signal
+        val scale = target / peak
+        val out = FloatArray(signal.size)
+        for (i in signal.indices) {
+            out[i] = (signal[i] * scale).coerceIn(-1f, 1f)
+        }
+        return out
     }
 
     /**
-     * Compute the mel pseudo-inverse matrix from the mel filterbank.
-     *
-     * Given mel filterbank M [nMels, numBins], computes:
-     *   P = M^T * (M * M^T + eps * I)^{-1}
-     * Result is [numBins, nMels].
-     *
-     * This allows the vocoder to work without a pre-exported projection matrix file.
+     * Compute the mel pseudo-inverse [numBins, nMels] from a mel filterbank
+     * [nMels, numBins] as P = M^T * (M*M^T + eps*I)^{-1}.
      */
     private fun computeMelPseudoInverse(melFilterbank: Array<DoubleArray>): Array<FloatArray> {
         val rows = melFilterbank.size        // nMels
         val cols = melFilterbank[0].size     // numBins
+        require(rows == nMels && cols == numBins) {
+            "Mel filterbank shape [$rows, $cols] does not match [$nMels, $numBins]"
+        }
         val eps = 1e-8
 
         Log.i(TAG, "Computing mel pseudo-inverse from filterbank [$rows, $cols]")
 
-        // Compute G = M * M^T  [nMels, nMels]
+        // G = M * M^T  [nMels, nMels]
         val g = Array(rows) { DoubleArray(rows) }
         for (i in 0 until rows) {
             for (j in i until rows) {
@@ -332,8 +312,7 @@ class GriffinLimVocoder(
             }
         }
 
-        // Invert G using Gauss-Jordan elimination
-        // Augmented matrix [G | I]
+        // Invert G via Gauss-Jordan on augmented [G | I].
         val aug = Array(rows) { i ->
             DoubleArray(2 * rows).also { row ->
                 for (j in 0 until rows) row[j] = g[i][j]
@@ -342,11 +321,10 @@ class GriffinLimVocoder(
         }
 
         for (col in 0 until rows) {
-            // Find pivot
-            var maxVal = kotlin.math.abs(aug[col][col])
+            var maxVal = abs(aug[col][col])
             var maxRow = col
             for (row in col + 1 until rows) {
-                val v = kotlin.math.abs(aug[row][col])
+                val v = abs(aug[row][col])
                 if (v > maxVal) { maxVal = v; maxRow = row }
             }
             if (maxRow != col) {
@@ -354,12 +332,10 @@ class GriffinLimVocoder(
             }
 
             val pivot = aug[col][col]
-            if (kotlin.math.abs(pivot) < 1e-15) continue
+            if (abs(pivot) < 1e-15) continue
 
-            // Scale pivot row
             for (j in 0 until 2 * rows) aug[col][j] /= pivot
 
-            // Eliminate column in all other rows
             for (row in 0 until rows) {
                 if (row == col) continue
                 val factor = aug[row][col]
@@ -369,10 +345,9 @@ class GriffinLimVocoder(
             }
         }
 
-        // Extract G^{-1} from augmented matrix
         val gInv = Array(rows) { i -> DoubleArray(rows) { j -> aug[i][rows + j] } }
 
-        // Compute P = M^T * G^{-1}  [numBins, nMels]
+        // P = M^T * G^{-1}  [numBins, nMels]
         val result = Array(cols) { FloatArray(rows) }
         for (k in 0 until cols) {
             for (j in 0 until rows) {
@@ -386,17 +361,5 @@ class GriffinLimVocoder(
 
         Log.i(TAG, "Mel pseudo-inverse computed: [$cols, $rows]")
         return result
-    }
-
-    /**
-     * Synthesize from codebook indices only (looks up embeddings from codebook).
-     */
-    fun synthesizeFromIndices(codebookIndices: IntArray): FloatArray {
-        val cb = codebook ?: return FloatArray(0)
-        val vqEmbedding = Array(codebookIndices.size) { i ->
-            val idx = codebookIndices[i].coerceIn(0, cb.size - 1)
-            cb[idx]
-        }
-        return synthesize(vqEmbedding, codebookIndices)
     }
 }

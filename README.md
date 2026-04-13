@@ -457,35 +457,31 @@ can output audio, not just embeddings. This is a prerequisite for Stages 6 and 7
 routing and SDK integration meaningless for those tiers.
 
 **Approach: Griffin-Lim (classical, no ML)**
-- Train a small linear layer (64→80) to project VQ embeddings back to mel space
-- Use Griffin-Lim algorithm to reconstruct waveform from estimated mel
+- Reconstruct waveform directly from the analysis log-mel using Griffin-Lim
+- The decoder needs no encoder output — it consumes the same normalized log-mel
+  that is fed to the encoder, mirroring `reconstruct_wav_griffinlim` in
+  `EDGY_ExportedModels_Inference.ipynb`
 - Quality: robotic but intelligible. Latency: ~10ms per chunk. No ONNX model needed.
-- Export the 64→80 projection matrix from the notebook as `vq_to_mel_projection.npy`
+- The mel pseudo-inverse is computed in-process from the analysis filterbank,
+  so no extra model artifact is required.
 
 **Components to build:**
 - vocoder/GriffinLimVocoder.kt:
   ```
-  Constructor(projectionMatrix: Array<FloatArray>, config: ModelConfig)
-    — projectionMatrix: [64, 80] loaded from vq_to_mel_projection.npy
-    — Precompute inverse mel filterbank for Griffin-Lim
+  Constructor(config: ModelConfig, melFilterbank: Array<DoubleArray>,
+              iterations: Int = 32, momentum: Double = 0.99)
+    — Precompute the mel pseudo-inverse from the analysis filterbank
 
-  reconstruct(vqEmbedding: Array<FloatArray>): FloatArray
-    — Project VQ embeddings [T', 64] → estimated mel [80, T']
-    — Apply Griffin-Lim iterative phase reconstruction (30 iterations)
-    — Return PCM float [-1, 1]
-
-  reconstructStreaming(vqEmbedding: Array<FloatArray>): FloatArray
-    — Same as above with overlap-add for streaming chunks
+  synthesize(logMelNorm: Array<FloatArray>): FloatArray
+    — Denormalize log-mel to amplitude
+    — Project to linear magnitude via the mel pseudo-inverse
+    — Run Griffin-Lim with momentum (matches librosa.griffinlim)
+    — De-emphasize and peak-normalize to PCM float [-1, 1]
   ```
 - Integration with PrivacyPipeline: MODERATE/HIGH tiers reconstruct audio
-  after encoding, so PrivacyOutput includes `reconstructedAudio: FloatArray?`
+  after extracting the mel, so `PrivacyOutput` includes
+  `reconstructedAudio: FloatArray?`
 - Output reconstructed audio to file and (later) AudioTrack
-
-**New model artifact:**
-```
-exported_models/
-└── vq_to_mel_projection.npy    # float32 [64, 80] — trained projection matrix
-```
 
 **Verification:**
 1. Reconstructed speech is intelligible (human listening test)

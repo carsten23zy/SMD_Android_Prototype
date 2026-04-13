@@ -257,10 +257,8 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                // Stage 5: Load projection matrix and create vocoder
-                val projMatrix = manager.loadProjectionMatrix()
-                val codebook = try { manager.loadCodebook() } catch (e: Exception) { null }
-                val voc = GriffinLimVocoder(config, projMatrix, codebook, extractor.getMelFilterbank())
+                // Stage 5: Griffin-Lim vocoder reconstructs audio directly from log-mel.
+                val voc = GriffinLimVocoder(config, extractor.getMelFilterbank())
                 vocoder = voc
 
                 modelManager = manager
@@ -275,7 +273,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 withContext(Dispatchers.Main) {
-                    val vocoderStatus = if (voc.isAvailable) "vocoder: ON" else "vocoder: OFF (no projection matrix)"
+                    val vocoderStatus = if (voc.isAvailable) "vocoder: ON" else "vocoder: OFF"
                     tvModelInfo.text = "${manager.getModelInfo()}\n$vocoderStatus"
                     updateStatus("Model loaded — ready")
                     setProcessingEnabled(true)
@@ -431,8 +429,7 @@ class MainActivity : AppCompatActivity() {
                         melExtractor = result.melExtractor
                         val spk = result.speakerEmbeddings ?: emptyArray()
                         val voc = GriffinLimVocoder(
-                            result.config!!, result.projectionMatrix,
-                            try { manager.loadCodebook() } catch (e: Exception) { null },
+                            result.config!!,
                             result.melExtractor.getMelFilterbank()
                         )
                         vocoder = voc
@@ -516,8 +513,7 @@ class MainActivity : AppCompatActivity() {
                     melExtractor = result.melExtractor
                     val spk = result.speakerEmbeddings ?: emptyArray()
                     val voc = GriffinLimVocoder(
-                        result.config!!, result.projectionMatrix,
-                        try { manager.loadCodebook() } catch (e: Exception) { null },
+                        result.config!!,
                         result.melExtractor.getMelFilterbank()
                     )
                     vocoder = voc

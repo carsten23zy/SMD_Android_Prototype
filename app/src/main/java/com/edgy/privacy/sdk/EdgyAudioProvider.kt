@@ -163,9 +163,7 @@ class EdgyAudioProvider : Service() {
                 emptyArray<FloatArray>()
             }
 
-            val projMatrix = manager.loadProjectionMatrix()
-            val codebook = try { manager.loadCodebook() } catch (e: Exception) { null }
-            val vocoder = GriffinLimVocoder(config, projMatrix, codebook, melExtractor.getMelFilterbank())
+            val vocoder = GriffinLimVocoder(config, melExtractor.getMelFilterbank())
 
             val pl = PrivacyPipeline(melExtractor, encoder, speakerEmbeddings, vocoder = vocoder)
             pl.setTier(currentTier)

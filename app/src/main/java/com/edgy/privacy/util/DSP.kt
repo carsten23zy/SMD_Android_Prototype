@@ -29,6 +29,32 @@ object DSP {
     }
 
     /**
+     * Apply de-emphasis filter (inverse of [applyPreemphasis]):
+     *   y[n] = x[n] + coeff * y[n-1]
+     * Matches `librosa.effects.deemphasis` with default `zi=None`.
+     */
+    fun applyDeemphasis(pcm: FloatArray, coeff: Float): FloatArray {
+        if (pcm.isEmpty()) return FloatArray(0)
+        val out = FloatArray(pcm.size)
+        out[0] = pcm[0]
+        for (i in 1 until pcm.size) {
+            out[i] = pcm[i] + coeff * out[i - 1]
+        }
+        return out
+    }
+
+    /** Same as [applyDeemphasis] but operating on doubles in-place-friendly form. */
+    fun applyDeemphasis(pcm: DoubleArray, coeff: Double): DoubleArray {
+        if (pcm.isEmpty()) return DoubleArray(0)
+        val out = DoubleArray(pcm.size)
+        out[0] = pcm[0]
+        for (i in 1 until pcm.size) {
+            out[i] = pcm[i] + coeff * out[i - 1]
+        }
+        return out
+    }
+
+    /**
      * Generate a Hann window of the given size.
      * Matches numpy.hanning() / scipy.signal.hann(): periodic Hann window.
      */

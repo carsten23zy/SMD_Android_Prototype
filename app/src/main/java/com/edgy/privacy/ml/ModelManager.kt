@@ -41,7 +41,6 @@ class ModelManager(private val context: Context) {
     private var currentModelSource: ModelSource = ModelSource.BUNDLED
     private var currentCodebook: Array<FloatArray>? = null
     private var currentSpeakerEmbeddings: Array<FloatArray>? = null
-    private var currentProjectionMatrix: Array<FloatArray>? = null
 
     // For hot-swap fallback
     private var previousEncoder: EdgyEncoder? = null
@@ -119,34 +118,6 @@ class ModelManager(private val context: Context) {
         val codebook = stream.use { NpyReader.read(it).toFloatMatrix() }
         currentCodebook = codebook
         return codebook
-    }
-
-    /**
-     * Load mel pseudo-inverse projection matrix from mel_pseudo_inverse.npy [nFft/2+1, nMels].
-     * Used by Griffin-Lim vocoder to invert mel spectrograms back to linear spectrograms.
-     *
-     * Computed as: M^T * (M*M^T + eps*I)^{-1}
-     * where M is the [nMels, nFft/2+1] mel filterbank.
-     *
-     * Returns null (instead of throwing) if the file is not found,
-     * allowing graceful fallback (vocoder returns silence).
-     */
-    fun loadProjectionMatrix(): Array<FloatArray>? {
-        currentProjectionMatrix?.let { return it }
-        val config = loadConfig()
-        val stream = resolveModelStream(config.files.projectionMatrix)
-        if (stream == null) {
-            Log.w(TAG, "Projection matrix not found: ${config.files.projectionMatrix}")
-            return null
-        }
-        return try {
-            val matrix = stream.use { NpyReader.read(it).toFloatMatrix() }
-            currentProjectionMatrix = matrix
-            matrix
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to load projection matrix: ${e.message}")
-            null
-        }
     }
 
     /**
@@ -329,9 +300,8 @@ class ModelManager(private val context: Context) {
         currentModelSource = ModelSource.EXTERNAL
         currentCodebook = null
         currentSpeakerEmbeddings = null
-        currentProjectionMatrix = null
 
-        // Load new codebook, speaker embeddings, and projection matrix
+        // Load new codebook and speaker embeddings.
         try {
             val codebookFile = File(path, newConfig.files.codebook)
             if (codebookFile.exists()) {
@@ -354,17 +324,6 @@ class ModelManager(private val context: Context) {
             Log.w(TAG, "Could not load speaker embeddings from new model: ${e.message}")
         }
 
-        try {
-            val projFile = File(path, newConfig.files.projectionMatrix)
-            if (projFile.exists()) {
-                currentProjectionMatrix = FileInputStream(projFile).use {
-                    NpyReader.read(it).toFloatMatrix()
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Could not load projection matrix from new model: ${e.message}")
-        }
-
         // Create new MelSpectrogramExtractor with updated config
         val newMelExtractor = MelSpectrogramExtractor(newConfig)
 
@@ -376,7 +335,6 @@ class ModelManager(private val context: Context) {
             melExtractor = newMelExtractor,
             codebook = currentCodebook,
             speakerEmbeddings = currentSpeakerEmbeddings,
-            projectionMatrix = currentProjectionMatrix,
             modelSizeBytes = modelFile.length()
         )
     }
@@ -389,7 +347,6 @@ class ModelManager(private val context: Context) {
         currentConfig = null
         currentCodebook = null
         currentSpeakerEmbeddings = null
-        currentProjectionMatrix = null
         currentModelSource = ModelSource.BUNDLED
 
         return try {
@@ -397,7 +354,6 @@ class ModelManager(private val context: Context) {
             val encoder = loadEncoder(preferInt8)
             val codebook = try { loadCodebook() } catch (e: Exception) { null }
             val spkEmb = try { loadSpeakerEmbeddings() } catch (e: Exception) { null }
-            val projMatrix = loadProjectionMatrix()
             val melExtractor = MelSpectrogramExtractor(config)
 
             ReloadResult(
@@ -406,8 +362,7 @@ class ModelManager(private val context: Context) {
                 encoder = encoder,
                 melExtractor = melExtractor,
                 codebook = codebook,
-                speakerEmbeddings = spkEmb,
-                projectionMatrix = projMatrix
+                speakerEmbeddings = spkEmb
             )
         } catch (e: Exception) {
             ReloadResult(success = false, error = e.message ?: "Unknown error")
@@ -512,11 +467,6 @@ class ModelManager(private val context: Context) {
      * Resolve a model stream by name, checking external storage first, then assets.
      */
     private fun resolveModelStream(filename: String): java.io.InputStream? {
-        // Gson bypasses Kotlin default values and null-safety, so fields with
-        // defaults (e.g. projectionMatrix) can be null at runtime if absent in JSON.
-        @Suppress("SENSELESS_COMPARISON")
-        if (filename == null) return null
-
         // Check external storage first
         val externalFile = getExternalModelFile(filename)
         if (externalFile != null && externalFile.exists()) {
@@ -613,7 +563,6 @@ class ModelManager(private val context: Context) {
         val melExtractor: MelSpectrogramExtractor? = null,
         val codebook: Array<FloatArray>? = null,
         val speakerEmbeddings: Array<FloatArray>? = null,
-        val projectionMatrix: Array<FloatArray>? = null,
         val modelSizeBytes: Long = 0
     )
 }

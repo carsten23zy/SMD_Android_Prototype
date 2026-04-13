@@ -71,9 +71,7 @@ class PrivacyPipeline(
                 } else {
                     null
                 }
-                val reconstructed = vocoder?.synthesize(
-                    encoderOutput.vqEmbedding, encoderOutput.codebookIndices
-                )
+                val reconstructed = vocoder?.synthesize(mel)
                 PrivacyOutput(
                     rawAudio = null,
                     reconstructedAudio = reconstructed,
@@ -87,9 +85,7 @@ class PrivacyPipeline(
             PrivacyTier.HIGH -> {
                 val mel = melExtractor.extract(pcm)
                 val encoderOutput = encoder.encode(mel)
-                val reconstructed = vocoder?.synthesize(
-                    encoderOutput.vqEmbedding, encoderOutput.codebookIndices
-                )
+                val reconstructed = vocoder?.synthesize(mel)
                 PrivacyOutput(
                     rawAudio = null,
                     reconstructedAudio = reconstructed,
@@ -136,9 +132,7 @@ class PrivacyPipeline(
                 } else {
                     null
                 }
-                val reconstructed = vocoder?.synthesize(
-                    encoderOutput.vqEmbedding, encoderOutput.codebookIndices
-                )
+                val reconstructed = vocoder?.synthesize(mel)
                 PrivacyOutput(
                     reconstructedAudio = reconstructed,
                     vqEmbedding = encoderOutput.vqEmbedding,
@@ -154,9 +148,7 @@ class PrivacyPipeline(
                     return PrivacyOutput(tier = PrivacyTier.HIGH, processingTimeMs = 0)
                 }
                 val encoderOutput = encoder.encode(mel)
-                val reconstructed = vocoder?.synthesize(
-                    encoderOutput.vqEmbedding, encoderOutput.codebookIndices
-                )
+                val reconstructed = vocoder?.synthesize(mel)
                 PrivacyOutput(
                     reconstructedAudio = reconstructed,
                     vqEmbedding = encoderOutput.vqEmbedding,
